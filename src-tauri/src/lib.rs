@@ -1,6 +1,7 @@
 mod claude;
 mod fsops;
 mod git;
+mod intel;
 mod pty;
 mod shellenv;
 
@@ -28,6 +29,7 @@ pub fn run() {
             git::checkpoint_create,
             git::checkpoint_changes,
             git::file_at_tree,
+            intel::project_intel,
             claude::claude_detect,
             claude::claude_start,
             claude::claude_send,

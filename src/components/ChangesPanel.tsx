@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { Check, ChevronDown, ChevronRight, History, RotateCcw, X } from 'lucide-react'
-import { useStore } from '../lib/store'
+import { useActiveTask, useStore } from '../lib/store'
 import { changedIdsInFile, rollup, type Decision, type FileChange } from '../lib/review'
 import { Button, Empty, Panel, Stat, StateMark } from './ui'
 
@@ -10,10 +10,8 @@ import { Button, Empty, Panel, Stat, StateMark } from './ui'
  * the checkpoint history that makes any of it reversible.
  */
 export function ChangesPanel() {
-  const files = useStore((s) => s.files)
-  const groups = useStore((s) => s.groups)
-  const decisions = useStore((s) => s.decisions)
-  const selected = useStore((s) => s.selected)
+  const task = useActiveTask()
+  const { files, groups, decisions, selected } = task
   const select = useStore((s) => s.select)
   const decide = useStore((s) => s.decide)
   const acceptAll = useStore((s) => s.acceptAll)
@@ -230,10 +228,9 @@ function GroupBlock({
 }
 
 function CheckpointList() {
-  const checkpoints = useStore((s) => s.checkpoints)
+  const { checkpoints, baseTree } = useActiveTask()
   const restore = useStore((s) => s.restore)
-  const baseTree = useStore((s) => s.baseTree)
-  const setBase = useStore((s) => s.set)
+  const setBaseTree = useStore((s) => s.setBaseTree)
   const refresh = useStore((s) => s.refreshChanges)
 
   return (
@@ -262,7 +259,7 @@ function CheckpointList() {
               variant="ghost"
               title="Diff against this checkpoint"
               onClick={() => {
-                setBase('baseTree', c.tree)
+                setBaseTree(c.tree)
                 void refresh()
               }}
             >

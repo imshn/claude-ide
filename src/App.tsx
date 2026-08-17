@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import clsx from 'clsx'
-import { Check, Files, GitBranch, GitCompare, Settings, X } from 'lucide-react'
+import { Check, Files, GitBranch, GitCompare, Layers, Settings, X } from 'lucide-react'
 import { onClaude } from './lib/ipc'
-import { useStore, type View } from './lib/store'
+import { useActiveTask, useStore, type View } from './lib/store'
 import { TitleBar } from './components/TitleBar'
 import { FileTree } from './components/FileTree'
 import { ChangesPanel } from './components/ChangesPanel'
+import { TasksPanel } from './components/TasksPanel'
 import { GitPanel } from './components/GitPanel'
 import { EditorPane } from './components/EditorPane'
 import { ChatPanel } from './components/ChatPanel'
@@ -14,22 +15,24 @@ import { TerminalPanel } from './components/TerminalPanel'
 import { CommandPalette, type Command } from './components/CommandPalette'
 import { Button } from './components/ui'
 
-const VIEWS: { id: View; icon: typeof Files; label: string }[] = [
-  { id: 'explorer', icon: Files, label: 'Explorer' },
-  { id: 'changes', icon: GitCompare, label: 'Changes' },
-  { id: 'git', icon: GitBranch, label: 'Source control' },
+const VIEWS: { id: View; icon: typeof Files; label: string; key: string }[] = [
+  { id: 'explorer', icon: Files, label: 'Explorer', key: '⌘1' },
+  { id: 'changes', icon: GitCompare, label: 'Changes', key: '⌘2' },
+  { id: 'git', icon: GitBranch, label: 'Source control', key: '⌘3' },
+  { id: 'tasks', icon: Layers, label: 'Tasks', key: '⌘4' },
 ]
 
 export default function App() {
   const store = useStore()
+  const task = useActiveTask()
   const [settingsOpen, setSettingsOpen] = useState(false)
 
-  // One listener for the whole app; the store turns events into chat state.
+  // One listener for every session; events are routed to their task by id.
   useEffect(() => {
     const off = onClaude((e) => {
-      if (e.session !== useStore.getState().sessionId) return
-      if (e.kind === 'message') useStore.getState().ingest(e.data)
-      else if (e.kind === 'closed') useStore.setState({ claudeUp: false, busy: false })
+      const s = useStore.getState()
+      if (e.kind === 'message') s.ingest(e.session, e.data)
+      else if (e.kind === 'closed') s.sessionClosed(e.session)
       else if (e.kind === 'stderr' && typeof e.data === 'string' && e.data.trim()) {
         useStore.setState({ status: e.data.slice(0, 160) })
       }
@@ -53,16 +56,18 @@ export default function App() {
       { id: 'explorer', label: 'Show Explorer', keys: '⌘1', run: () => store.set('view', 'explorer') },
       { id: 'changes', label: 'Show Changes', keys: '⌘2', run: () => store.set('view', 'changes') },
       { id: 'git', label: 'Show Source control', keys: '⌘3', run: () => store.set('view', 'git') },
+      { id: 'tasks', label: 'Show Tasks', keys: '⌘4', run: () => store.set('view', 'tasks') },
       { id: 'term', label: 'Toggle terminal', keys: '⌘J', run: () => store.set('terminalOpen', !store.terminalOpen) },
+      { id: 'rescan', label: 'Rescan project intelligence', hint: 'stack, commands, size', run: () => void store.refreshIntel() },
       { id: 'refresh', label: 'Refresh changes', hint: 'recompute diff', run: () => void store.refreshChanges() },
       { id: 'checkpoint', label: 'Create checkpoint', hint: 'restore point', run: () => void store.snapshot('Manual checkpoint') },
       { id: 'accept', label: 'Accept all changes', run: () => void store.acceptAll() },
       { id: 'reject', label: 'Reject all changes', hint: 'revert to checkpoint', run: () => void store.rejectAll() },
-      { id: 'restart', label: 'Restart Claude Code session', run: () => void store.stopClaude().then(() => store.startClaude()) },
+      { id: 'stop', label: 'Stop the running task', run: () => task.id && void store.stopTask(task.id) },
       { id: 'settings', label: 'Settings', keys: '⌘,', run: () => setSettingsOpen(true) },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [store.terminalOpen],
+    [store.terminalOpen, task.id],
   )
 
   useEffect(() => {
@@ -77,6 +82,7 @@ export default function App() {
       else if (hit('1')) { e.preventDefault(); s.set('view', 'explorer') }
       else if (hit('2')) { e.preventDefault(); s.set('view', 'changes') }
       else if (hit('3')) { e.preventDefault(); s.set('view', 'git') }
+      else if (hit('4')) { e.preventDefault(); s.set('view', 'tasks') }
       else if (hit('escape')) s.set('paletteOpen', false)
     }
     window.addEventListener('keydown', onKey)
@@ -106,8 +112,11 @@ export default function App() {
               )}
             >
               <Icon size={16} />
-              {id === 'changes' && store.files.length > 0 && (
+              {id === 'changes' && task.files.length > 0 && (
                 <span className="absolute top-1.5 right-1.5 h-1.5 w-1.5 rounded-full bg-accent" />
+              )}
+              {id === 'tasks' && store.tasks.some((t) => t.busy) && (
+                <span className="absolute top-1.5 right-1.5 h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
               )}
             </button>
           ))}
@@ -125,6 +134,7 @@ export default function App() {
           {store.view === 'explorer' && <FileTree onPickFolder={pickFolder} />}
           {store.view === 'changes' && <ChangesPanel />}
           {store.view === 'git' && <GitPanel />}
+          {store.view === 'tasks' && <TasksPanel />}
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">
@@ -143,7 +153,7 @@ export default function App() {
           )}
         </main>
 
-        <aside className="w-[380px] shrink-0">
+        <aside className="flex w-[380px] shrink-0 flex-col">
           <ChatPanel />
         </aside>
       </div>

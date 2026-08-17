@@ -40,14 +40,20 @@ export function Panel({
   actions,
   children,
   className,
+  /** Panels that scroll internally must opt out, or their own scroller sits
+   *  inside this one and their pinned footers get pushed off-screen. */
+  scroll = true,
 }: {
   title?: ReactNode
   actions?: ReactNode
   children: ReactNode
   className?: string
+  scroll?: boolean
 }) {
   return (
-    <div className={clsx('flex min-h-0 flex-col bg-panel', className)}>
+    // h-full is load-bearing: without it the panel grows to fit its content and
+    // any pinned footer (the composer, the plan gate) is pushed off-screen.
+    <div className={clsx('flex h-full min-h-0 flex-col bg-panel', className)}>
       {title !== undefined && (
         <header className="hairline flex h-9 shrink-0 items-center justify-between px-3">
           <h2 className="text-[11px] font-semibold uppercase tracking-[0.08em] text-fg-dim">
@@ -56,7 +62,9 @@ export function Panel({
           <div className="flex items-center gap-0.5">{actions}</div>
         </header>
       )}
-      <div className="min-h-0 flex-1 overflow-auto">{children}</div>
+      <div className={clsx('min-h-0 flex-1', scroll ? 'overflow-auto' : 'overflow-hidden')}>
+        {children}
+      </div>
     </div>
   )
 }

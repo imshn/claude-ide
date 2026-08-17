@@ -65,6 +65,10 @@ export const checkpoint = {
     invoke<string>('file_at_tree', { cwd, tree, path }),
 }
 
+export const intel = {
+  scan: <T>(root: string) => invoke<T>('project_intel', { root }),
+}
+
 export const claude = {
   detect: (overridePath?: string) => invoke<Detection>('claude_detect', { overridePath }),
   start: (opts: {
@@ -74,6 +78,7 @@ export const claude = {
     model?: string
     permissionMode?: string
     resume?: string
+    lean?: boolean
   }) => invoke<void>('claude_start', opts),
   send: (id: string, text: string) => invoke<void>('claude_send', { id, text }),
   stop: (id: string) => invoke<void>('claude_stop', { id }),

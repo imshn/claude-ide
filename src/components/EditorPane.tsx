@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import Editor, { type OnMount } from '@monaco-editor/react'
 import clsx from 'clsx'
 import { X } from 'lucide-react'
-import { useStore } from '../lib/store'
+import { useActiveTask, useStore } from '../lib/store'
 import { DiffReview } from './DiffReview'
 import { Empty } from './ui'
 
@@ -26,8 +26,7 @@ export function EditorPane() {
   const reveal = useStore((s) => s.reveal)
   const setReveal = useStore((s) => s.setReveal)
   const view = useStore((s) => s.view)
-  const files = useStore((s) => s.files)
-  const selected = useStore((s) => s.selected)
+  const { files, selected } = useActiveTask()
 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null)
   const monacoRef = useRef<Parameters<OnMount>[1] | null>(null)

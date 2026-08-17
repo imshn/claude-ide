@@ -109,18 +109,83 @@ Authentication and `auth.test.ts` under Tests. It is a guess, not semantics; the
 grouping function is one pure function and is the obvious place to later ask
 Claude to group changes instead.
 
+## AI orchestration (Phase A)
+
+**Project Intelligence** (`src-tauri/src/intel.rs`) scans the repo on open —
+deterministically, with no model call, so it costs milliseconds and zero tokens.
+Package manager comes from the *lockfile*, not `package.json`, because that is
+the only reliable signal. The result is summarised into a ~100-token brief
+(`src/lib/intel.ts`) prepended to each task's first message.
+
+It changes agent behaviour measurably: given the brief, Claude said *"This repo
+is tiny (8 files, 27 lines total) — reading directly rather than spawning an
+Explore agent"* instead of burning a turn on discovery.
+
+**Tasks** (`src/lib/tasks.ts`) replace one long chat. Each owns its session,
+conversation, activity, checkpoints, baseline and review decisions, so two pieces
+of work never share a review queue.
+
+Tasks run **one at a time**, with a visible queue. Concurrency is not an
+oversight: checkpoints diff the whole working tree, so parallel agents would
+attribute each other's edits to the wrong task and one task's "reject" could
+delete another's work. Real isolation needs worktrees (Phase C).
+
+**Planning** uses `--permission-mode plan`, which is native to Claude Code.
+Large requests plan first, small ones do not (`shouldPlan`, biased towards *not*
+planning — an unwanted plan is friction on every small request). The plan is
+editable, and the edited text is what executes.
+
+Capturing the plan is fiddlier than it looks, and all three of these were found
+by running it:
+
+- Claude Code emits a plan **either** as an `ExitPlanMode` tool call **or** as a
+  markdown file under `~/.claude/plans/`. Version 2.1.226 does the latter, and
+  sometimes attempts the former and has it denied — with the plan still in the
+  payload. Both paths are handled.
+- A `tool_use` event is only the *request*; a plan file does not exist until its
+  **result** arrives. Reading on `tool_use` always read a missing file.
+- The gate keys off a `planMode` flag, not a status string, because planning can
+  legitimately take several turns.
+
+**Activity** (`src/lib/activity.ts`) maps raw tool traffic to readable events
+("Read auth.ts", "Ran tests", "10 passed, 2 failed"), each expandable to the raw
+payload. It reads the *output*, not just the exit code — a tool that exits 0
+while its output says tests failed is still shown as failed.
+
+**Context sent** shows exactly what we prepend, and is labelled that way on
+purpose. We cannot introspect Claude Code's own context assembly, so a panel
+claiming to show "what Claude knows" would be a confident lie.
+
+Session startup is **lean by default** (`--strict-mcp-config`): a full personal
+config measured ~209k tokens of cache creation per session, which a
+task-per-session model multiplies. Toggle it per workspace in the Context panel.
+
 ## Architecture
 
 ```
 src-tauri/            Rust: process, PTY, git, filesystem
   claude.rs           spawn + stream the local CLI (stream-json over stdio)
   git.rs              git plumbing, checkpoints, diffs
+  intel.rs            deterministic project scan (no model call)
   pty.rs              integrated terminal
   shellenv.rs         resolve the login-shell PATH (a Finder-launched .app
                       otherwise cannot see ~/.local/bin/claude)
 src/lib/review.ts     the change-review engine — pure, no UI, self-checked
-src/lib/store.ts      application state
+src/lib/tasks.ts      task model, planning heuristic, plan capture — pure
+src/lib/activity.ts   tool traffic -> readable events — pure
+src/lib/intel.ts      project brief generation — pure
+src/lib/store.ts      application state, keyed by task
 src/components/       UI
+```
+
+The four `lib/*.ts` modules above are pure and covered by two self-checks:
+
+```bash
+npx esbuild src/lib/review.selfcheck.ts --bundle --platform=node --format=cjs --outfile=/tmp/rc.cjs && node /tmp/rc.cjs
+```
+
+```bash
+npx esbuild src/lib/phasea.selfcheck.ts --bundle --platform=node --format=cjs --outfile=/tmp/pa.cjs && node /tmp/pa.cjs
 ```
 
 The Claude integration is confined to `claude.rs` plus `lib/ipc.ts`. Swapping in
@@ -148,4 +213,10 @@ committed automatically, and any change is revertible at line granularity.
 - Grouping is path-based, so an unusual layout falls back to top-level directory.
 - No file-system watcher. The change list refreshes when a turn ends or on
   demand.
-- One Claude session per window.
+- One task executes at a time; parallel agents need Phase C worktrees.
+- `acceptEdits` permits edits but **not** Bash, so Claude cannot run the test
+  suite unattended — it asks instead. Test intelligence in Phase B needs a
+  permission story (Claude Code hooks via `--settings` are the supported route).
+- Planning depends on model behaviour: Claude sometimes delegates planning to a
+  background subagent and returns no plan. The task then falls back to Ready
+  rather than blocking.

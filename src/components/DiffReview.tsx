@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import clsx from 'clsx'
 import { Check, CornerDownLeft, FileCode2, MessageSquarePlus, X } from 'lucide-react'
-import { useStore } from '../lib/store'
+import { useActiveTask, useStore } from '../lib/store'
 import {
   changedIdsInFile,
   changedIdsInHunk,
@@ -18,7 +18,7 @@ import { Button, Stat, StateMark } from './ui'
  * limitation.
  */
 export function DiffReview({ file }: { file: FileChange }) {
-  const decisions = useStore((s) => s.decisions)
+  const { decisions } = useActiveTask()
   const decide = useStore((s) => s.decide)
   const openFile = useStore((s) => s.openFile)
   const setReveal = useStore((s) => s.setReveal)
@@ -247,7 +247,7 @@ function AskClaude({
   onDone: () => void
 }) {
   const [text, setText] = useState('')
-  const prompt = useStore((s) => s.prompt)
+  const sendToActive = useStore((s) => s.sendToActive)
   const decide = useStore((s) => s.decide)
 
   const submit = async () => {
@@ -258,7 +258,7 @@ function AskClaude({
       snippet ? `\nThe change in question:\n\`\`\`diff\n${snippet}\n\`\`\`` : '',
     ].join('')
     onDone()
-    await prompt(body)
+    await sendToActive(body)
   }
 
   return (

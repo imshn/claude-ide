@@ -121,6 +121,10 @@ pub fn claude_start(
     model: Option<String>,
     permission_mode: Option<String>,
     resume: Option<String>,
+    // Skip the user's MCP servers. Measured at ~209k tokens of cache creation
+    // per session on a full config, which a task-per-session model multiplies.
+    // The IDE supplies project context itself, so this is the default.
+    lean: Option<bool>,
 ) -> Result<(), String> {
     let mut map = state.0.lock().map_err(|e| e.to_string())?;
     if map.contains_key(&id) {
@@ -143,6 +147,9 @@ pub fn claude_start(
         // is checkpointed first and nothing is committed automatically.
         .args(["--permission-mode", permission_mode.as_deref().unwrap_or("acceptEdits")]);
 
+    if lean.unwrap_or(true) {
+        cmd.arg("--strict-mcp-config");
+    }
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         cmd.args(["--model", &m]);
     }

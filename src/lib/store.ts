@@ -7,71 +7,77 @@ import {
   type Decision,
   type FileChange,
   type FileStatus,
-  type Group,
 } from './review'
-import { checkpoint, claude, fs, git, relative, type Detection, type RepoStatus } from './ipc'
+import {
+  checkpoint,
+  claude,
+  fs,
+  git,
+  intel as intelApi,
+  relative,
+  type Detection,
+  type RepoStatus,
+} from './ipc'
+import { activityFor, applyResult, type Activity } from './activity'
+import { projectCard, type Intel } from './intel'
+import {
+  createTask,
+  planFromTool,
+  shouldPlan,
+  titleFrom,
+  type ChatItem,
+  type Task,
+  type TaskStatus,
+} from './tasks'
 
-export interface ToolCall {
-  id: string
-  name: string
-  input: unknown
-  result?: string
-  isError?: boolean
-}
+export type View = 'explorer' | 'changes' | 'git' | 'tasks'
+export type { ChatItem, Task }
 
-export type ChatItem =
-  | { kind: 'user'; text: string }
-  | { kind: 'assistant'; text: string }
-  | { kind: 'tool'; call: ToolCall }
-  | { kind: 'notice'; text: string; tone: 'info' | 'error' }
-  | { kind: 'turn'; ok: boolean; ms: number; checkpoint?: string }
+/** Stable identity so components can read fields with no task open. */
+const EMPTY: Task = Object.freeze({ ...createTask(''), id: '', title: '' }) as Task
 
-export interface Checkpoint {
-  tree: string
-  label: string
-  at: number
-}
-
-export type View = 'explorer' | 'changes' | 'git'
+/** tool_use id -> plan file path, awaiting the tool result that creates it. */
+const pendingPlans = new Map<string, string>()
 
 interface State {
   root: string | null
   repo: RepoStatus | null
-
+  intel: Intel | null
+  intelLoading: boolean
   detection: Detection | null
-  sessionId: string
-  claudeUp: boolean
-  busy: boolean
-  chat: ChatItem[]
-  streaming: string
+  /** Skip the user's MCP servers in task sessions. See claude.rs for why. */
+  lean: boolean
+
+  tasks: Task[]
+  activeId: string | null
 
   tabs: string[]
   active: string | null
   contents: Record<string, string>
   reveal: { abs: string; line: number } | null
 
-  baseTree: string | null
-  checkpoints: Checkpoint[]
-  files: FileChange[]
-  groups: Group[]
-  decisions: Map<string, Decision>
-  written: Record<string, string>
-  selected: string | null
-
   view: View
   paletteOpen: boolean
   terminalOpen: boolean
+  contextOpen: boolean
   status: string
 }
 
 interface Actions {
   openFolder: (path: string) => Promise<void>
   refreshRepo: () => Promise<void>
+  refreshIntel: () => Promise<void>
   detectClaude: (override?: string) => Promise<void>
-  startClaude: () => Promise<void>
-  stopClaude: () => Promise<void>
-  prompt: (text: string) => Promise<void>
-  ingest: (raw: unknown) => void
+
+  newTask: (request: string) => Promise<void>
+  selectTask: (id: string) => void
+  closeTask: (id: string) => Promise<void>
+  sendToActive: (text: string) => Promise<void>
+  approvePlan: (id: string, text: string) => Promise<void>
+  cancelPlan: (id: string) => Promise<void>
+  stopTask: (id: string) => Promise<void>
+  ingest: (sessionId: string, raw: unknown) => void
+  sessionClosed: (sessionId: string) => void
 
   openFile: (abs: string) => Promise<void>
   closeTab: (abs: string) => void
@@ -79,359 +85,561 @@ interface Actions {
   saveFile: (abs: string, text: string) => Promise<void>
   setReveal: (r: { abs: string; line: number } | null) => void
 
-  snapshot: (label: string) => Promise<string | null>
-  refreshChanges: () => Promise<void>
+  /** `taskId` is required for background work: the active task can change
+   *  mid-run, and a checkpoint or diff must belong to the task that caused it. */
+  snapshot: (label: string, taskId?: string) => Promise<string | null>
+  refreshChanges: (taskId?: string) => Promise<void>
   decide: (ids: string[], d: Decision) => Promise<void>
   acceptAll: () => Promise<void>
   rejectAll: () => Promise<void>
   restore: (tree: string) => Promise<void>
   select: (path: string | null) => void
+  setBaseTree: (tree: string) => void
 
   set: <K extends keyof State>(k: K, v: State[K]) => void
   note: (text: string) => void
 }
 
-const SESSION = crypto.randomUUID()
+type Store = State & Actions
 
-export const useStore = create<State & Actions>((setState, get) => ({
-  root: null,
-  repo: null,
-  detection: null,
-  sessionId: SESSION,
-  claudeUp: false,
-  busy: false,
-  chat: [],
-  streaming: '',
-  tabs: [],
-  active: null,
-  contents: {},
-  reveal: null,
-  baseTree: null,
-  checkpoints: [],
-  files: [],
-  groups: [],
-  decisions: new Map(),
-  written: {},
-  selected: null,
-  view: 'explorer',
-  paletteOpen: false,
-  terminalOpen: false,
-  status: 'Ready',
+export const useStore = create<Store>((setState, get) => {
+  /** Replace one task immutably. */
+  const patch = (id: string, fn: (t: Task) => Task) =>
+    setState({ tasks: get().tasks.map((t) => (t.id === id ? fn(t) : t)) })
 
-  set: (k, v) => setState({ [k]: v } as Pick<State, typeof k>),
-  note: (text) => setState({ status: text }),
+  const find = (id: string) => get().tasks.find((t) => t.id === id)
+  const activeTask = () => get().tasks.find((t) => t.id === get().activeId)
 
-  // -- workspace ------------------------------------------------------------
-  async openFolder(path) {
-    let root = path
+  /** Sequential execution: one task may hold the working tree at a time. */
+  const holder = () => get().tasks.find((t) => t.busy)
+
+  const setStatus = (id: string, status: TaskStatus) => patch(id, (t) => ({ ...t, status }))
+
+  /** Spawn (or respawn) the CLI for a task. Resumes when we already have a session. */
+  const spawn = async (task: Task, permissionMode: string): Promise<boolean> => {
+    const { root, detection, lean } = get()
+    if (!root || !detection?.found) return false
+    await claude.stop(task.sessionId).catch(() => {})
     try {
-      root = (await git.root(path)) || path
-    } catch {
-      /* not a repo — handled by refreshRepo */
+      await claude.start({
+        id: task.sessionId,
+        cwd: root,
+        bin: detection.path,
+        permissionMode,
+        lean,
+        resume: task.claudeSessionId,
+      })
+      patch(task.id, (t) => ({ ...t, running: true, planMode: permissionMode === 'plan' }))
+      return true
+    } catch (e) {
+      patch(task.id, (t) => ({
+        ...t,
+        running: false,
+        status: 'failed',
+        error: String(e),
+        chat: [...t.chat, { kind: 'notice', tone: 'error', text: String(e), at: Date.now() }],
+      }))
+      return false
     }
-    setState({
-      root,
-      tabs: [],
-      active: null,
-      contents: {},
-      files: [],
-      groups: [],
-      decisions: new Map(),
-      written: {},
-      baseTree: null,
-      checkpoints: [],
-      chat: [],
-      status: `Opened ${root.split('/').pop()}`,
-    })
-    await get().refreshRepo()
-    // Becomes the diff baseline immediately, so changes made by anything —
-    // Claude, the terminal, another editor — are reviewable from the start.
-    const tree = await get().snapshot('Opened workspace')
-    setState({ baseTree: tree })
-  },
+  }
 
-  async refreshRepo() {
+  /** Send text, taking a checkpoint first so the turn is always reversible. */
+  const send = async (id: string, text: string) => {
+    const task = find(id)
     const root = get().root
-    if (!root) return
-    try {
-      setState({ repo: await git.status(root) })
-    } catch (e) {
-      setState({ repo: null, status: String(e) })
-    }
-  },
-
-  // -- claude ---------------------------------------------------------------
-  async detectClaude(override) {
-    const detection = await claude.detect(override)
-    setState({ detection })
-  },
-
-  async startClaude() {
-    const { root, detection, sessionId } = get()
-    if (!root) return
-    if (!detection?.found) {
-      setState({
-        chat: [
-          ...get().chat,
-          {
-            kind: 'notice',
-            tone: 'error',
-            text: 'Claude Code was not found. Set its path in Settings (⌘,).',
-          },
-        ],
-      })
-      return
-    }
-    try {
-      await claude.start({ id: sessionId, cwd: root, bin: detection.path })
-      setState({ claudeUp: true, status: 'Claude Code running' })
-    } catch (e) {
-      setState({
-        claudeUp: false,
-        chat: [...get().chat, { kind: 'notice', tone: 'error', text: String(e) }],
-      })
-    }
-  },
-
-  async stopClaude() {
-    await claude.stop(get().sessionId).catch(() => {})
-    setState({ claudeUp: false, busy: false, status: 'Claude Code stopped' })
-  },
-
-  async prompt(text) {
-    const { root, claudeUp, sessionId } = get()
-    if (!root || !text.trim()) return
-    if (!claudeUp) await get().startClaude()
-    if (!get().claudeUp) return
-
-    // Every turn gets a restore point before Claude touches anything.
-    const tree = await get().snapshot(text.slice(0, 60))
-    setState({
-      chat: [...get().chat, { kind: 'user', text }],
+    if (!task || !root) return
+    const tree = await get().snapshot(task.title, id)
+    patch(id, (t) => ({
+      ...t,
       busy: true,
       streaming: '',
-      baseTree: tree ?? get().baseTree,
-    })
+      turns: t.turns + 1,
+      baseTree: tree ?? t.baseTree,
+    }))
     try {
-      await claude.send(sessionId, text)
+      await claude.send(task.sessionId, text)
     } catch (e) {
-      setState({
+      patch(id, (t) => ({
+        ...t,
         busy: false,
-        chat: [...get().chat, { kind: 'notice', tone: 'error', text: String(e) }],
-      })
+        status: 'failed',
+        error: String(e),
+        chat: [...t.chat, { kind: 'notice', tone: 'error', text: String(e), at: Date.now() }],
+      }))
     }
-  },
+  }
 
-  /** Translate one Claude Code stream-json event into chat state. */
-  ingest(raw) {
-    const ev = raw as any
-    const chat = [...get().chat]
+  /** Start the next queued task once the tree is free. */
+  const drain = () => {
+    if (holder()) return
+    const next = get().tasks.find((t) => t.status === 'queued')
+    if (next) void begin(next.id)
+  }
 
-    switch (ev?.type) {
-      case 'system':
-        if (ev.subtype === 'init') setState({ status: `Claude ready · ${ev.model ?? ''}`.trim() })
-        return
-
-      case 'stream_event': {
-        const d = ev.event?.delta
-        if (d?.type === 'text_delta') setState({ streaming: get().streaming + d.text })
-        return
-      }
-
-      case 'assistant': {
-        for (const block of ev.message?.content ?? []) {
-          if (block.type === 'text' && block.text?.trim()) {
-            chat.push({ kind: 'assistant', text: block.text })
-          } else if (block.type === 'tool_use') {
-            chat.push({
-              kind: 'tool',
-              call: { id: block.id, name: block.name, input: block.input },
-            })
-          }
-        }
-        setState({ chat, streaming: '' })
-        return
-      }
-
-      case 'user': {
-        // Tool results arrive as synthetic user turns.
-        for (const block of ev.message?.content ?? []) {
-          if (block.type !== 'tool_result') continue
-          const idx = chat.findIndex((c) => c.kind === 'tool' && c.call.id === block.tool_use_id)
-          if (idx < 0) continue
-          const item = chat[idx] as Extract<ChatItem, { kind: 'tool' }>
-          const text =
-            typeof block.content === 'string'
-              ? block.content
-              : (block.content ?? [])
-                  .map((c: any) => c.text ?? '')
-                  .join('\n')
-          chat[idx] = {
-            kind: 'tool',
-            call: { ...item.call, result: text, isError: !!block.is_error },
-          }
-        }
-        setState({ chat })
-        return
-      }
-
-      case 'result': {
-        chat.push({
-          kind: 'turn',
-          ok: ev.subtype === 'success',
-          ms: ev.duration_ms ?? 0,
-          checkpoint: get().baseTree ?? undefined,
-        })
-        setState({ chat, busy: false, streaming: '' })
-        // Claude has stopped writing — surface whatever landed on disk.
-        void get().refreshChanges()
-        void get().refreshRepo()
-        return
-      }
+  /** Plan-first or straight to execution, depending on the request. */
+  const begin = async (id: string) => {
+    const task = find(id)
+    if (!task) return
+    if (holder() && holder()!.id !== id) {
+      setStatus(id, 'queued')
+      return
     }
-  },
 
-  // -- editor ---------------------------------------------------------------
-  async openFile(abs) {
-    const { tabs, contents } = get()
-    if (!(abs in contents)) {
+    const { plan, reason } = shouldPlan(task.request)
+    // Request first: Claude Code derives plan filenames from the opening line,
+    // and a brief-first prompt produced plans named after the brief.
+    const card = projectCard(get().intel)
+    const opener = card ? `${task.request}\n\n${card}` : task.request
+
+    if (plan) {
+      patch(id, (t) => ({
+        ...t,
+        status: 'planning',
+        chat: [
+          ...t.chat,
+          { kind: 'user', text: t.request, at: Date.now() },
+          { kind: 'notice', tone: 'info', text: `Planning first — ${reason}.`, at: Date.now() },
+        ],
+      }))
+      if (!(await spawn(task, 'plan'))) return
+      await send(id, opener)
+    } else {
+      patch(id, (t) => ({
+        ...t,
+        status: 'executing',
+        chat: [...t.chat, { kind: 'user', text: t.request, at: Date.now() }],
+      }))
+      if (!(await spawn(task, 'acceptEdits'))) return
+      await send(id, opener)
+    }
+  }
+
+  return {
+    root: null,
+    repo: null,
+    intel: null,
+    intelLoading: false,
+    detection: null,
+    lean: true,
+    tasks: [],
+    activeId: null,
+    tabs: [],
+    active: null,
+    contents: {},
+    reveal: null,
+    view: 'explorer',
+    paletteOpen: false,
+    terminalOpen: false,
+    contextOpen: false,
+    status: 'Ready',
+
+    set: (k, v) => setState({ [k]: v } as Pick<State, typeof k>),
+    note: (text) => setState({ status: text }),
+    setReveal: (r) => setState({ reveal: r }),
+    setActive: (abs) => setState({ active: abs }),
+    select: (path) => {
+      const t = activeTask()
+      if (t) patch(t.id, (x) => ({ ...x, selected: path }))
+    },
+    setBaseTree: (tree) => {
+      const t = activeTask()
+      if (t) patch(t.id, (x) => ({ ...x, baseTree: tree }))
+    },
+
+    // -- workspace ----------------------------------------------------------
+    async openFolder(path) {
+      for (const t of get().tasks) await claude.stop(t.sessionId).catch(() => {})
+      let root = path
       try {
-        const text = await fs.read(abs)
-        setState({ contents: { ...get().contents, [abs]: text } })
-      } catch (e) {
-        setState({ status: `Cannot open: ${e}` })
-        return
+        root = (await git.root(path)) || path
+      } catch {
+        /* not a repo — surfaced by refreshRepo */
       }
-    }
-    setState({ tabs: tabs.includes(abs) ? tabs : [...tabs, abs], active: abs })
-  },
+      setState({
+        root,
+        tasks: [],
+        activeId: null,
+        tabs: [],
+        active: null,
+        contents: {},
+        intel: null,
+        view: 'explorer',
+        status: `Opened ${root.split('/').pop()}`,
+      })
+      await get().refreshRepo()
+      void get().refreshIntel()
+    },
 
-  closeTab(abs) {
-    const tabs = get().tabs.filter((t) => t !== abs)
-    const active = get().active === abs ? (tabs[tabs.length - 1] ?? null) : get().active
-    setState({ tabs, active })
-  },
+    async refreshRepo() {
+      const root = get().root
+      if (!root) return
+      try {
+        setState({ repo: await git.status(root) })
+      } catch (e) {
+        setState({ repo: null, status: String(e) })
+      }
+    },
 
-  setActive: (abs) => setState({ active: abs }),
-  setReveal: (r) => setState({ reveal: r }),
+    async refreshIntel() {
+      const root = get().root
+      if (!root) return
+      setState({ intelLoading: true })
+      try {
+        setState({ intel: await intelApi.scan<Intel>(root), intelLoading: false })
+      } catch (e) {
+        setState({ intelLoading: false, status: `Project scan failed: ${e}` })
+      }
+    },
 
-  async saveFile(abs, text) {
-    await fs.write(abs, text)
-    setState({ contents: { ...get().contents, [abs]: text }, status: 'Saved' })
-    void get().refreshRepo()
-  },
+    async detectClaude(override) {
+      setState({ detection: await claude.detect(override) })
+    },
 
-  // -- change review --------------------------------------------------------
-  async snapshot(label) {
-    const root = get().root
-    if (!root) return null
-    try {
-      const tree = await checkpoint.create(root)
-      const existing = get().checkpoints
-      if (existing[0]?.tree === tree) return tree
-      setState({ checkpoints: [{ tree, label, at: Date.now() }, ...existing].slice(0, 40) })
-      return tree
-    } catch (e) {
-      setState({ status: `Checkpoint failed: ${e}` })
-      return null
-    }
-  },
+    // -- tasks --------------------------------------------------------------
+    async newTask(request) {
+      if (!get().root || !request.trim()) return
+      const task = createTask(request.trim())
+      setState({ tasks: [task, ...get().tasks], activeId: task.id, view: 'tasks' })
+      await begin(task.id)
+    },
 
-  /**
-   * Recompute the review set from the active checkpoint. Decisions already
-   * applied to disk are folded in: a rejected line is gone from the file, so it
-   * simply no longer appears as a change. Undo lives at checkpoint granularity.
-   */
-  async refreshChanges() {
-    const { root, baseTree } = get()
-    if (!root || !baseTree) return
-    try {
-      const changed = await checkpoint.changes(root, baseTree)
-      const files: FileChange[] = []
+    selectTask: (id) => setState({ activeId: id, view: 'tasks' }),
+
+    async closeTask(id) {
+      const task = find(id)
+      if (task) await claude.stop(task.sessionId).catch(() => {})
+      const tasks = get().tasks.filter((t) => t.id !== id)
+      setState({ tasks, activeId: get().activeId === id ? (tasks[0]?.id ?? null) : get().activeId })
+      drain()
+    },
+
+    /** A follow-up message inside the active task's existing conversation. */
+    async sendToActive(text) {
+      const task = activeTask()
+      if (!task || !text.trim()) return
+      if (!task.running && !(await spawn(task, 'acceptEdits'))) return
+      patch(task.id, (t) => ({
+        ...t,
+        status: 'executing',
+        chat: [...t.chat, { kind: 'user', text, at: Date.now() }],
+      }))
+      await send(task.id, text)
+    },
+
+    async approvePlan(id, text) {
+      const task = find(id)
+      if (!task) return
+      patch(id, (t) => ({
+        ...t,
+        status: 'executing',
+        plan: t.plan ? { ...t.plan, text, approved: true } : undefined,
+        chat: [...t.chat, { kind: 'notice', tone: 'info', text: 'Plan approved — executing.', at: Date.now() }],
+      }))
+      // Permission mode is fixed per process, so drop out of plan mode by
+      // resuming the same Claude session in an editing mode.
+      const fresh = find(id)!
+      if (!(await spawn(fresh, 'acceptEdits'))) return
+      await send(id, `Implement this plan exactly. Do not re-plan.\n\n${text}`)
+    },
+
+    async cancelPlan(id) {
+      const task = find(id)
+      if (task) await claude.stop(task.sessionId).catch(() => {})
+      patch(id, (t) => ({
+        ...t,
+        running: false,
+        busy: false,
+        status: 'idle',
+        chat: [...t.chat, { kind: 'notice', tone: 'info', text: 'Plan cancelled.', at: Date.now() }],
+      }))
+      drain()
+    },
+
+    async stopTask(id) {
+      const task = find(id)
+      if (task) await claude.stop(task.sessionId).catch(() => {})
+      patch(id, (t) => ({ ...t, running: false, busy: false, status: 'idle' }))
+      drain()
+    },
+
+    sessionClosed(sessionId) {
+      const task = get().tasks.find((t) => t.sessionId === sessionId)
+      if (!task) return
+      patch(task.id, (t) => ({ ...t, running: false, busy: false }))
+      drain()
+    },
+
+    /** Route one stream-json event into its task. */
+    ingest(sessionId, raw) {
+      const task = get().tasks.find((t) => t.sessionId === sessionId)
+      if (!task) return
+      const id = task.id
+      const ev = raw as any
+
+      switch (ev?.type) {
+        case 'system':
+          if (ev.subtype === 'init') {
+            patch(id, (t) => ({ ...t, claudeSessionId: ev.session_id ?? t.claudeSessionId }))
+            setState({ status: `Claude ready · ${ev.model ?? ''}`.trim() })
+          }
+          return
+
+        case 'stream_event': {
+          const d = ev.event?.delta
+          if (d?.type === 'text_delta') {
+            patch(id, (t) => ({ ...t, streaming: t.streaming + d.text }))
+          }
+          return
+        }
+
+        case 'assistant': {
+          for (const block of ev.message?.content ?? []) {
+            if (block.type === 'text' && block.text?.trim()) {
+              patch(id, (t) => ({
+                ...t,
+                streaming: '',
+                chat: [...t.chat, { kind: 'assistant', text: block.text, at: Date.now() }],
+              }))
+            } else if (block.type === 'tool_use') {
+              const act = activityFor(block.id, block.name, block.input, Date.now())
+              patch(id, (t) => ({ ...t, streaming: '', activity: [...t.activity, act] }))
+
+              // A tool_use is only the *request*. An inline plan is already in
+              // the payload, but a plan file does not exist until the tool has
+              // run, so defer that read until its result arrives.
+              const found = planFromTool(block.name, block.input)
+              if (found?.inline) void capturePlan(id, found)
+              else if (found?.path) pendingPlans.set(block.id, found.path)
+            }
+          }
+          return
+        }
+
+        case 'user': {
+          for (const block of ev.message?.content ?? []) {
+            if (block.type !== 'tool_result') continue
+
+            const planPath = pendingPlans.get(block.tool_use_id)
+            if (planPath) {
+              pendingPlans.delete(block.tool_use_id)
+              if (!block.is_error) void capturePlan(id, { path: planPath })
+            }
+
+            const text =
+              typeof block.content === 'string'
+                ? block.content
+                : (block.content ?? []).map((c: any) => c.text ?? '').join('\n')
+            patch(id, (t) => ({
+              ...t,
+              activity: t.activity.map((a) =>
+                a.id === block.tool_use_id ? applyResult(a, text, !!block.is_error) : a,
+              ),
+            }))
+          }
+          return
+        }
+
+        case 'result': {
+          const ok = ev.subtype === 'success'
+          patch(id, (t) => ({
+            ...t,
+            busy: false,
+            streaming: '',
+            ms: t.ms + (ev.duration_ms ?? 0),
+            chat: [...t.chat, { kind: 'turn', ok, ms: ev.duration_ms ?? 0, at: Date.now() }],
+            // An unapproved plan always parks at the gate — capturePlan may have
+            // already set that, and this must not race past it.
+            status: t.planMode
+              ? t.plan && !t.plan.approved
+                ? 'plan-ready'
+                : 'planning' // still thinking; a plan has not landed yet
+              : ok
+                ? 'review'
+                : 'failed',
+          }))
+          void get().refreshChanges(id)
+          void get().refreshRepo()
+          drain()
+          return
+        }
+      }
+    },
+
+    // -- editor -------------------------------------------------------------
+    async openFile(abs) {
+      const { tabs, contents } = get()
+      if (!(abs in contents)) {
+        try {
+          const text = await fs.read(abs)
+          setState({ contents: { ...get().contents, [abs]: text } })
+        } catch (e) {
+          setState({ status: `Cannot open: ${e}` })
+          return
+        }
+      }
+      setState({ tabs: tabs.includes(abs) ? tabs : [...tabs, abs], active: abs })
+    },
+
+    closeTab(abs) {
+      const tabs = get().tabs.filter((t) => t !== abs)
+      const active = get().active === abs ? (tabs[tabs.length - 1] ?? null) : get().active
+      setState({ tabs, active })
+    },
+
+    async saveFile(abs, text) {
+      await fs.write(abs, text)
+      setState({ contents: { ...get().contents, [abs]: text }, status: 'Saved' })
+      void get().refreshRepo()
+    },
+
+    // -- change review (scoped to the active task) --------------------------
+    async snapshot(label, taskId) {
+      const { root } = get()
+      const task = taskId ? find(taskId) : activeTask()
+      if (!root || !task) return null
+      try {
+        const tree = await checkpoint.create(root)
+        patch(task.id, (t) =>
+          t.checkpoints[0]?.tree === tree
+            ? t
+            : { ...t, checkpoints: [{ tree, label, at: Date.now() }, ...t.checkpoints].slice(0, 40) },
+        )
+        return tree
+      } catch (e) {
+        setState({ status: `Checkpoint failed: ${e}` })
+        return null
+      }
+    },
+
+    async refreshChanges(taskId) {
+      const { root } = get()
+      const task = taskId ? find(taskId) : activeTask()
+      if (!root || !task?.baseTree) return
+      try {
+        const changed = await checkpoint.changes(root, task.baseTree)
+        const files: FileChange[] = []
+        for (const c of changed) {
+          const abs = `${root}/${c.path}`
+          const baseline = await checkpoint.fileAt(root, task.baseTree, c.path)
+          const current = c.status === 'D' ? '' : await fs.read(abs).catch(() => '')
+          const status = (c.status === 'A' ? 'A' : c.status === 'D' ? 'D' : 'M') as FileStatus
+          files.push(buildFileChange(c.path, abs, status, baseline, current))
+        }
+        files.sort((a, b) => a.path.localeCompare(b.path))
+        patch(task.id, (t) => ({
+          ...t,
+          files,
+          groups: groupFiles(files),
+          selected:
+            t.selected && files.some((f) => f.path === t.selected)
+              ? t.selected
+              : (files[0]?.path ?? null),
+        }))
+        setState({
+          view: files.length ? 'changes' : get().view,
+          status: files.length
+            ? `${files.length} file${files.length > 1 ? 's' : ''} to review`
+            : 'No changes',
+        })
+      } catch (e) {
+        setState({ status: `Diff failed: ${e}` })
+      }
+    },
+
+    async decide(ids, d) {
+      const task = activeTask()
+      if (!task) return
+      const decisions = new Map(task.decisions)
+      for (const id of ids) decisions.set(id, d)
+
+      const touched = new Set(ids.map((id) => id.split('#')[0]))
+      const written = { ...task.written }
+      const contents = { ...get().contents }
+
+      for (const file of task.files) {
+        if (!touched.has(file.path)) continue
+        const next = reconstruct(file, decisions)
+        if (written[file.path] === next) continue
+        if (next === '' && file.status === 'A') await fs.remove(file.absPath).catch(() => {})
+        else await fs.write(file.absPath, next).catch(() => {})
+        written[file.path] = next
+        if (file.absPath in contents) contents[file.absPath] = next
+      }
+
+      patch(task.id, (t) => ({ ...t, decisions, written }))
+      setState({ contents })
+      void get().refreshRepo()
+    },
+
+    async acceptAll() {
+      const task = activeTask()
+      if (!task) return
+      await get().decide(task.files.flatMap(changedIdsInFile), 'accepted')
+      patch(task.id, (t) => ({ ...t, status: 'completed' }))
+      setState({ status: 'All changes accepted' })
+    },
+
+    async rejectAll() {
+      const task = activeTask()
+      if (!task) return
+      await get().decide(task.files.flatMap(changedIdsInFile), 'rejected')
+      setState({ status: 'All changes reverted' })
+    },
+
+    async restore(tree) {
+      const { root } = get()
+      const task = activeTask()
+      if (!root || !task) return
+      const changed = await checkpoint.changes(root, tree)
       for (const c of changed) {
         const abs = `${root}/${c.path}`
-        const baseline = await checkpoint.fileAt(root, baseTree, c.path)
-        let current = ''
-        if (c.status !== 'D') current = await fs.read(abs).catch(() => '')
-        const status = (c.status === 'A' ? 'A' : c.status === 'D' ? 'D' : 'M') as FileStatus
-        files.push(buildFileChange(c.path, abs, status, baseline, current))
+        const baseline = await checkpoint.fileAt(root, tree, c.path)
+        if (c.status === 'A' && baseline === '') await fs.remove(abs).catch(() => {})
+        else await fs.write(abs, baseline).catch(() => {})
       }
-      files.sort((a, b) => a.path.localeCompare(b.path))
-      setState({
-        files,
-        groups: groupFiles(files),
-        selected: get().selected && files.some((f) => f.path === get().selected)
-          ? get().selected
-          : (files[0]?.path ?? null),
-        view: files.length ? 'changes' : get().view,
-        status: files.length ? `${files.length} file${files.length > 1 ? 's' : ''} to review` : 'No changes',
-      })
-    } catch (e) {
-      setState({ status: `Diff failed: ${e}` })
-    }
-  },
+      patch(task.id, (t) => ({ ...t, decisions: new Map(), written: {} }))
+      setState({ contents: {}, status: 'Restored checkpoint' })
+      await get().refreshChanges()
+      await get().refreshRepo()
+    },
+  }
 
-  async decide(ids, d) {
-    const decisions = new Map(get().decisions)
-    for (const id of ids) decisions.set(id, d)
-    setState({ decisions })
-
-    // Only rejections change bytes; write the files those ids belong to.
-    const touched = new Set(ids.map((id) => id.split('#')[0]))
-    const written = { ...get().written }
-    for (const file of get().files) {
-      if (!touched.has(file.path)) continue
-      const next = reconstruct(file, decisions)
-      if (written[file.path] === next) continue
-      if (next === '' && file.status === 'A') {
-        await fs.remove(file.absPath).catch(() => {})
-      } else {
-        await fs.write(file.absPath, next).catch(() => {})
-      }
-      written[file.path] = next
-      // Keep an open editor tab in step with what is now on disk.
-      if (file.absPath in get().contents) {
-        setState({ contents: { ...get().contents, [file.absPath]: next } })
-      }
-    }
-    setState({ written })
-    void get().refreshRepo()
-  },
-
-  async acceptAll() {
-    const ids = get().files.flatMap(changedIdsInFile)
-    await get().decide(ids, 'accepted')
-    setState({ status: 'All changes accepted' })
-  },
-
-  async rejectAll() {
-    const ids = get().files.flatMap(changedIdsInFile)
-    await get().decide(ids, 'rejected')
-    setState({ status: 'All changes reverted' })
-  },
-
-  /** Put every file back the way it was at a checkpoint. */
-  async restore(tree) {
-    const root = get().root
-    if (!root) return
-    const changed = await checkpoint.changes(root, tree)
-    for (const c of changed) {
-      const abs = `${root}/${c.path}`
-      const baseline = await checkpoint.fileAt(root, tree, c.path)
-      if (c.status === 'A' && baseline === '') await fs.remove(abs).catch(() => {})
-      else await fs.write(abs, baseline).catch(() => {})
-    }
+  /**
+   * Plans arrive either inline or as a file Claude wrote; normalise both.
+   *
+   * Reading the file is async and routinely finishes *after* the turn's `result`
+   * event, so this also settles the status rather than leaving that to whichever
+   * of the two happens to land last.
+   */
+  async function capturePlan(id: string, found: { inline?: string; path?: string }) {
+    let text = found.inline ?? ''
+    if (!text && found.path) text = await fs.read(found.path).catch(() => '')
+    if (!text.trim()) return
     setState({
-      decisions: new Map(),
-      written: {},
-      contents: {},
-      status: 'Restored checkpoint',
+      tasks: get().tasks.map((t) =>
+        t.id !== id
+          ? t
+          : {
+              ...t,
+              plan: {
+                text,
+                source: found.inline ? 'tool' : 'file',
+                path: found.path,
+                approved: false,
+              },
+              title: t.title || titleFrom(text),
+              // Any unapproved plan from a plan-mode session opens the gate,
+              // however many turns the planning took.
+              status: t.planMode ? 'plan-ready' : t.status,
+            },
+      ),
     })
-    await get().refreshChanges()
-    await get().refreshRepo()
-  },
+  }
+})
 
-  select: (path) => setState({ selected: path }),
-}))
+/** Stable-identity accessor for the task the UI is showing. */
+export const useActiveTask = (): Task =>
+  useStore((s) => s.tasks.find((t) => t.id === s.activeId) ?? EMPTY)
 
 export const rel = relative
+export type { Activity }
