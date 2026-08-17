@@ -1,0 +1,121 @@
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+
+/* Design tokens.
+   Base palette follows the ui-ux-pro-max "Developer Tool / IDE" recommendation
+   (dark-only, semantic tokens, WCAG-checked pairs) but the neutrals are shifted
+   off slate-blue to a true neutral near-black: slate-900 + green-500 is the exact
+   generic-dashboard look this app is meant not to have. Accent is Claude's warm
+   terracotta so the agent surfaces read as one system.
+   Type sizes are desktop-IDE density (11-13px), not the skill's 16px mobile
+   minimum — that rule is scoped to touch UI. */
+@theme {
+  --color-bg: #0b0b0d;
+  --color-panel: #121215;
+  --color-elevated: #17171b;
+  --color-raised: #1e1e24;
+  --color-border: #26262d;
+  --color-border-soft: #1c1c22;
+
+  --color-fg: #e9e9ec;
+  --color-fg-muted: #9a9aa4;
+  --color-fg-dim: #6b6b76;
+
+  --color-accent: #d97757;
+  --color-accent-soft: #3a2018;
+  --color-on-accent: #16100c;
+
+  --color-add: #3fb950;
+  --color-add-bg: #10251a;
+  --color-del: #f85149;
+  --color-del-bg: #2a1417;
+  --color-pending: #d0a215;
+
+  --font-ui: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Inter', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+    overflow: hidden;
+  }
+  body {
+    margin: 0;
+    background: var(--color-bg);
+    color: var(--color-fg);
+    font-family: var(--font-ui);
+    font-size: 13px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    font-feature-settings: 'ss01', 'cv01';
+  }
+  /* Counts and line numbers must not jitter as digits change. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #2e2e36;
+    border-radius: 6px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3d3d47;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-corner,
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 1px;
+    border-radius: 3px;
+  }
+  button {
+    cursor: pointer;
+  }
+  button:disabled {
+    cursor: default;
+    opacity: 0.4;
+  }
+}
+
+@layer utilities {
+  .drag-region {
+    -webkit-app-region: drag;
+  }
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+  .hairline {
+    box-shadow: inset 0 -1px 0 var(--color-border-soft);
+  }
+  .anim {
+    transition: background-color 160ms ease-out, color 160ms ease-out,
+      border-color 160ms ease-out, opacity 160ms ease-out, transform 160ms ease-out;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  .anim {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+  }
+}
+
+.monaco-editor .margin,
+.monaco-editor-background {
+  background-color: var(--color-panel) !important;
+}

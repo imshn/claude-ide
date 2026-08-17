@@ -1,0 +1,62 @@
+name: Release
+
+# Tag a commit to cut a release:
+#   npm version patch && git push --follow-tags
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - name: Verify the review engine before shipping
+        run: |
+          npx esbuild src/lib/review.selfcheck.ts --bundle --platform=node \
+            --format=cjs --outfile=/tmp/rc.cjs --log-level=warning
+          node /tmp/rc.cjs
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional. Without these the .dmg is unsigned and macOS shows a
+          # Gatekeeper warning on first launch (right-click -> Open to bypass).
+          # Add them as repo secrets to get a clean double-click install.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          args: --target universal-apple-darwin
+          tagName: ${{ github.ref_name }}
+          releaseName: Claude IDE ${{ github.ref_name }}
+          releaseBody: |
+            Requires Claude Code installed and signed in on the machine.
+            This app never handles your credentials.
+
+            Unsigned build: on first launch, right-click the app and choose Open.
+          releaseDraft: true
+          prerelease: false
