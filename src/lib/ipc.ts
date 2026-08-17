@@ -69,6 +69,42 @@ export const intel = {
   scan: <T>(root: string) => invoke<T>('project_intel', { root }),
 }
 
+export interface Hit {
+  path: string
+  line: number
+  col: number
+  text: string
+  before: string[]
+  after: string[]
+}
+export interface SearchResults {
+  hits: Hit[]
+  files: string[]
+  truncated: boolean
+  scanned: number
+}
+
+export const search = {
+  run: (root: string, query: string, mode: string, caseSensitive: boolean) =>
+    invoke<SearchResults>('repo_search', { root, query, mode, caseSensitive }),
+}
+
+export const approval = {
+  setup: () => invoke<string>('approval_setup'),
+  respond: (id: string, allow: boolean, reason: string) =>
+    invoke<void>('approval_respond', { id, allow, reason }),
+}
+
+export interface ApprovalEvent {
+  id: string
+  tool: string
+  input: unknown
+  cwd: string
+}
+
+export const onApproval = (cb: (e: ApprovalEvent) => void) =>
+  listen<ApprovalEvent>('approval', (e) => cb(e.payload))
+
 export const claude = {
   detect: (overridePath?: string) => invoke<Detection>('claude_detect', { overridePath }),
   start: (opts: {
@@ -79,6 +115,7 @@ export const claude = {
     permissionMode?: string
     resume?: string
     lean?: boolean
+    settings?: string
   }) => invoke<void>('claude_start', opts),
   send: (id: string, text: string) => invoke<void>('claude_send', { id, text }),
   stop: (id: string) => invoke<void>('claude_stop', { id }),

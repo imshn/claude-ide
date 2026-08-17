@@ -1,12 +1,12 @@
 import clsx from 'clsx'
 import { FolderGit2, GitBranch, Search, SquareTerminal } from 'lucide-react'
-import { useActiveTask, useStore } from '../lib/store'
+import { useStore } from '../lib/store'
 import { Button } from './ui'
 
 export function TitleBar({ onPickFolder }: { onPickFolder: () => void }) {
   const root = useStore((s) => s.root)
   const repo = useStore((s) => s.repo)
-  const { files } = useActiveTask()
+  const files = useStore((s) => s.files)
   const set = useStore((s) => s.set)
   const terminalOpen = useStore((s) => s.terminalOpen)
 

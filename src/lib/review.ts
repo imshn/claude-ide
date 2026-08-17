@@ -41,6 +41,8 @@ export interface Hunk {
   /** Indices of the changed (non-context) lines in this hunk. */
   changed: number[]
   header: string
+  /** First line number in the current file, for a human-readable label. */
+  startLine: number
 }
 
 export type FileStatus = 'A' | 'M' | 'D'
@@ -110,6 +112,7 @@ export function buildFileChange(
       to,
       changed: [...run],
       header: `@@ -${baseStart} +${curStart} @@`,
+      startLine: curStart,
     })
     run = []
   }

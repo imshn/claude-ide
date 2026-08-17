@@ -1,8 +1,8 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
-import { GitBranch, GitCommit, Minus, Plus } from 'lucide-react'
+import { GitBranch, GitCommit, Minus, Plus, Sparkles } from 'lucide-react'
 import { git, type Commit } from '../lib/ipc'
-import { useStore } from '../lib/store'
+import { GIT_ASK_LABELS, useStore } from '../lib/store'
 import { Button, Empty, Panel } from './ui'
 
 const LABEL: Record<string, string> = {
@@ -15,7 +15,10 @@ export function GitPanel() {
   const refreshRepo = useStore((s) => s.refreshRepo)
   const openFile = useStore((s) => s.openFile)
   const note = useStore((s) => s.note)
-  const [message, setMessage] = useState('')
+  const message = useStore((s) => s.commitDraft)
+  const setMessage = useStore((s) => s.setCommitDraft)
+  const askGit = useStore((s) => s.askGit)
+  const busy = useStore((s) => s.busy)
   const [log, setLog] = useState<Commit[]>([])
   const [branches, setBranches] = useState<string[]>([])
 
@@ -89,10 +92,25 @@ export function GitPanel() {
       </div>
 
       <div className="border-b border-border p-2.5">
+        <div className="mb-2 flex flex-wrap gap-1">
+          {GIT_ASK_LABELS.map((a) => (
+            <button
+              key={a.id}
+              disabled={busy}
+              onClick={() => void askGit(a.id)}
+              className="anim flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[10.5px] text-fg-muted hover:border-accent/40 hover:text-fg disabled:opacity-40"
+            >
+              {a.id === 'commit-message' && <Sparkles size={9} className="text-accent" />}
+              {a.label}
+            </button>
+          ))}
+        </div>
+
         <textarea
           value={message}
+          spellCheck={false}
           onChange={(e) => setMessage(e.target.value)}
-          rows={2}
+          rows={message.includes('\n') ? 5 : 2}
           placeholder="Commit message"
           className="w-full resize-none rounded-md border border-border bg-elevated px-2 py-1.5 text-xs text-fg outline-none anim placeholder:text-fg-dim focus:border-accent/50"
         />

@@ -112,7 +112,7 @@ fn all_matches(hay: &[String], pairs: &[(&str, &str)]) -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn project_intel(root: String) -> Result<Intel, String> {
+pub async fn project_intel(root: String) -> Result<Intel, String> {
     let mut intel = Intel {
         root: root.clone(),
         name: Path::new(&root)

@@ -1,8 +1,10 @@
+mod approval;
 mod claude;
 mod fsops;
 mod git;
 mod intel;
 mod pty;
+mod search;
 mod shellenv;
 
 pub fn run() {
@@ -10,6 +12,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(claude::Sessions::default())
         .manage(pty::Terminals::default())
+        .manage(approval::Approvals::default())
         .invoke_handler(tauri::generate_handler![
             fsops::list_dir,
             fsops::read_file,
@@ -30,6 +33,10 @@ pub fn run() {
             git::checkpoint_changes,
             git::file_at_tree,
             intel::project_intel,
+            search::repo_search,
+            approval::approval_setup,
+            approval::approval_respond,
+            approval::approval_stats,
             claude::claude_detect,
             claude::claude_start,
             claude::claude_send,

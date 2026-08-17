@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import clsx from 'clsx'
 import { Check, CornerDownLeft, FileCode2, MessageSquarePlus, X } from 'lucide-react'
-import { useActiveTask, useStore } from '../lib/store'
+import { useStore } from '../lib/store'
 import {
   changedIdsInFile,
   changedIdsInHunk,
@@ -18,7 +18,7 @@ import { Button, Stat, StateMark } from './ui'
  * limitation.
  */
 export function DiffReview({ file }: { file: FileChange }) {
-  const { decisions } = useActiveTask()
+  const decisions = useStore((s) => s.decisions)
   const decide = useStore((s) => s.decide)
   const openFile = useStore((s) => s.openFile)
   const setReveal = useStore((s) => s.setReveal)
@@ -74,9 +74,11 @@ export function DiffReview({ file }: { file: FileChange }) {
       )}
 
       <div className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto font-mono text-[12px] leading-[19px]">
-        {file.hunks.map((hunk) => (
+        {file.hunks.map((hunk, i) => (
           <HunkBlock
             key={hunk.id}
+            index={i}
+            total={file.hunks.length}
             file={file}
             hunk={hunk}
             decisions={decisions}
@@ -95,6 +97,8 @@ export function DiffReview({ file }: { file: FileChange }) {
 }
 
 function HunkBlock({
+  index,
+  total,
   file,
   hunk,
   decisions,
@@ -103,6 +107,8 @@ function HunkBlock({
   asking,
   setAsking,
 }: {
+  index: number
+  total: number
   file: FileChange
   hunk: Hunk
   decisions: Map<string, Decision>
@@ -118,21 +124,24 @@ function HunkBlock({
     <section className="border-b border-border-soft last:border-0">
       <div className="group/hunk sticky top-0 z-[5] flex h-7 items-center gap-2 bg-elevated/95 px-3 backdrop-blur">
         <StateMark state={state} />
-        <span className="text-[11px] text-fg-dim">{hunk.header}</span>
-        <span className="tnum text-[11px] text-fg-dim">
-          {hunk.changed.length} line{hunk.changed.length > 1 ? 's' : ''}
+        <span className="text-[11px] text-fg-muted">
+          Block {index + 1} of {total}
         </span>
-        <div className="ml-auto flex items-center gap-0.5 opacity-0 anim group-hover/hunk:opacity-100 focus-within:opacity-100">
+        <span className="tnum text-[11px] text-fg-dim" title={hunk.header}>
+          line {hunk.startLine} · {hunk.changed.length} change
+          {hunk.changed.length > 1 ? 's' : ''}
+        </span>
+        <div className="ml-auto flex items-center gap-0.5">
           <Button compact variant="accept" onClick={() => void onDecide(ids, 'accepted')}>
-            <Check size={11} /> Hunk
+            <Check size={11} /> Block
           </Button>
           <Button compact variant="reject" onClick={() => void onDecide(ids, 'rejected')}>
-            <X size={11} /> Hunk
+            <X size={11} /> Block
           </Button>
           <Button
             compact
             variant="ghost"
-            title="Send an instruction about this hunk"
+            title="Send an instruction about this block"
             onClick={() => setAsking(asking === hunk.id ? null : hunk.id)}
           >
             <MessageSquarePlus size={11} />
@@ -142,7 +151,7 @@ function HunkBlock({
 
       {asking === hunk.id && (
         <AskClaude
-          scope={`this hunk in ${file.path}`}
+          scope={`this block in ${file.path}`}
           ids={ids}
           snippet={hunk.changed
             .map((i) => `${file.lines[i].op === 'add' ? '+' : '-'}${file.lines[i].text}`)
@@ -202,7 +211,9 @@ function HunkBlock({
               </pre>
 
               {changed && (
-                <div className="flex shrink-0 items-start gap-0.5 self-start pt-px pr-2 pl-1 opacity-0 anim group-hover/line:opacity-100 focus-within:opacity-100">
+                // Always present, dimmed until the row is hovered: hover-only
+                // controls on a review surface are a discoverability trap.
+                <div className="flex shrink-0 items-start gap-0.5 self-start pt-px pr-2 pl-1 opacity-55 anim group-hover/line:opacity-100 focus-within:opacity-100">
                   <StateMark state={d} />
                   <Button
                     compact
@@ -247,7 +258,7 @@ function AskClaude({
   onDone: () => void
 }) {
   const [text, setText] = useState('')
-  const sendToActive = useStore((s) => s.sendToActive)
+  const prompt = useStore((s) => s.prompt)
   const decide = useStore((s) => s.decide)
 
   const submit = async () => {
@@ -258,7 +269,7 @@ function AskClaude({
       snippet ? `\nThe change in question:\n\`\`\`diff\n${snippet}\n\`\`\`` : '',
     ].join('')
     onDone()
-    await sendToActive(body)
+    await prompt(body)
   }
 
   return (

@@ -31,11 +31,26 @@ jobs:
 
       - run: npm ci
 
+      - name: Typecheck
+        run: npx tsc --noEmit
+
       - name: Verify the review engine before shipping
         run: |
           npx esbuild src/lib/review.selfcheck.ts --bundle --platform=node \
             --format=cjs --outfile=/tmp/rc.cjs --log-level=warning
           node /tmp/rc.cjs
+
+      - name: Verify session logic
+        run: |
+          npx esbuild src/lib/session.selfcheck.ts --bundle --platform=node \
+            --format=cjs --outfile=/tmp/sc.cjs --log-level=warning
+          node /tmp/sc.cjs
+
+      # Checkpoints are the safety net for every AI change; a broken snapshot
+      # would silently disable the whole review workspace.
+      - name: Verify checkpoints
+        working-directory: src-tauri
+        run: cargo test
 
       - uses: tauri-apps/tauri-action@v0
         env:

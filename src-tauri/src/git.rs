@@ -47,7 +47,7 @@ pub struct RepoStatus {
 }
 
 #[tauri::command]
-pub fn git_status(cwd: String) -> Result<RepoStatus, String> {
+pub async fn git_status(cwd: String) -> Result<RepoStatus, String> {
     if run(&cwd, &["rev-parse", "--is-inside-work-tree"]).is_err() {
         return Ok(RepoStatus {
             is_repo: false,
@@ -106,7 +106,7 @@ pub fn git_status(cwd: String) -> Result<RepoStatus, String> {
 }
 
 #[tauri::command]
-pub fn git_stage(cwd: String, paths: Vec<String>) -> Result<(), String> {
+pub async fn git_stage(cwd: String, paths: Vec<String>) -> Result<(), String> {
     let mut args = vec!["add", "--"];
     let owned: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
     args.extend(owned);
@@ -114,7 +114,7 @@ pub fn git_stage(cwd: String, paths: Vec<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn git_unstage(cwd: String, paths: Vec<String>) -> Result<(), String> {
+pub async fn git_unstage(cwd: String, paths: Vec<String>) -> Result<(), String> {
     let mut args = vec!["restore", "--staged", "--"];
     let owned: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
     args.extend(owned);
@@ -122,18 +122,18 @@ pub fn git_unstage(cwd: String, paths: Vec<String>) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn git_commit(cwd: String, message: String) -> Result<String, String> {
+pub async fn git_commit(cwd: String, message: String) -> Result<String, String> {
     run(&cwd, &["commit", "-m", &message])
 }
 
 #[tauri::command]
-pub fn git_branches(cwd: String) -> Result<Vec<String>, String> {
+pub async fn git_branches(cwd: String) -> Result<Vec<String>, String> {
     let out = run(&cwd, &["branch", "--format=%(refname:short)"])?;
     Ok(out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
 }
 
 #[tauri::command]
-pub fn git_checkout(cwd: String, branch: String) -> Result<String, String> {
+pub async fn git_checkout(cwd: String, branch: String) -> Result<String, String> {
     run(&cwd, &["checkout", &branch])
 }
 
@@ -147,7 +147,7 @@ pub struct Commit {
 }
 
 #[tauri::command]
-pub fn git_log(cwd: String, limit: u32) -> Result<Vec<Commit>, String> {
+pub async fn git_log(cwd: String, limit: u32) -> Result<Vec<Commit>, String> {
     let fmt = "--pretty=format:%H%x1f%h%x1f%an%x1f%ar%x1f%s";
     let n = format!("-{limit}");
     let out = run(&cwd, &["log", &n, fmt])?;
@@ -167,12 +167,12 @@ pub fn git_log(cwd: String, limit: u32) -> Result<Vec<Commit>, String> {
 }
 
 #[tauri::command]
-pub fn git_repo_root(cwd: String) -> Result<String, String> {
+pub async fn git_repo_root(cwd: String) -> Result<String, String> {
     Ok(run(&cwd, &["rev-parse", "--show-toplevel"])?.trim().to_string())
 }
 
 #[tauri::command]
-pub fn git_init(cwd: String) -> Result<String, String> {
+pub async fn git_init(cwd: String) -> Result<String, String> {
     run(&cwd, &["init"])
 }
 
@@ -182,16 +182,112 @@ pub fn git_init(cwd: String) -> Result<String, String> {
 // stash is touched, and the objects survive so we can diff or restore later.
 // ---------------------------------------------------------------------------
 
-#[tauri::command]
-pub fn checkpoint_create(cwd: String) -> Result<String, String> {
-    let idx = std::env::temp_dir().join(format!("claude-ide-index-{}", std::process::id()));
+/// Plain helper: the command below and `checkpoint_changes` both need this, and
+/// a Tauri command is not callable from another command once it is async.
+pub fn write_tree(cwd: &str) -> Result<String, String> {
+    // A unique index per call. These commands run concurrently on the async
+    // runtime, and a shared per-process index meant one call could delete the
+    // index another was mid-way through building — yielding an empty tree id.
+    let idx = std::env::temp_dir().join(format!(
+        "claude-ide-index-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     let idx_str = idx.to_string_lossy().to_string();
-    let _ = std::fs::remove_file(&idx);
     let env = [("GIT_INDEX_FILE", idx_str.as_str())];
-    run_env(&cwd, &["add", "-A", "."], &env)?;
-    let tree = run_env(&cwd, &["write-tree"], &env)?;
+
+    let staged = run_env(cwd, &["add", "-A", "."], &env);
+    let tree = staged.and_then(|_| run_env(cwd, &["write-tree"], &env));
     let _ = std::fs::remove_file(&idx);
-    Ok(tree.trim().to_string())
+
+    let tree = tree?.trim().to_string();
+    // Never hand back an empty id: downstream it is falsy and silently disables
+    // the whole Changes workspace instead of reporting a failure.
+    if tree.len() != 40 || !tree.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!("git write-tree returned an unusable id: {tree:?}"));
+    }
+    // `git write-tree` on an index that failed to populate returns the *empty
+    // tree*, which is valid hex and passes every shape check. Accepting it as a
+    // baseline would report every file in the repo as newly added, and rejecting
+    // that "change" would delete the repo. Refuse it unless the repo is genuinely
+    // empty.
+    if tree == EMPTY_TREE && !run(cwd, &["ls-files"]).unwrap_or_default().trim().is_empty() {
+        return Err("checkpoint captured an empty tree for a non-empty repository".into());
+    }
+    Ok(tree)
+}
+
+/// git's hash for a tree with no entries.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command as Cmd;
+
+    fn tmp_repo(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("claude-ide-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "t@t"],
+            vec!["config", "user.name", "t"],
+        ] {
+            Cmd::new("git").current_dir(&dir).args(args).output().unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn captures_a_real_tree_and_sees_edits() {
+        let dir = tmp_repo("real");
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        let path = dir.to_string_lossy().to_string();
+
+        let base = write_tree(&path).expect("baseline");
+        assert_eq!(base.len(), 40);
+        assert_ne!(base, EMPTY_TREE, "a repo with a file must not hash to the empty tree");
+
+        // Same content twice must be stable, or every refresh looks like a change.
+        assert_eq!(base, write_tree(&path).unwrap());
+
+        std::fs::write(dir.join("a.txt"), "two\n").unwrap();
+        let after = write_tree(&path).unwrap();
+        assert_ne!(base, after, "an edit must change the tree id");
+
+        let diff = run(&path, &["diff", "--name-only", &base, &after]).unwrap();
+        assert!(diff.contains("a.txt"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_snapshots_all_agree() {
+        let dir = tmp_repo("concurrent");
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        let path = dir.to_string_lossy().to_string();
+
+        // Commands run on the async runtime, so this happens for real.
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let p = path.clone();
+                std::thread::spawn(move || write_tree(&p))
+            })
+            .collect();
+        let trees: Vec<String> = handles.into_iter().map(|h| h.join().unwrap().unwrap()).collect();
+
+        assert!(trees.iter().all(|t| *t == trees[0]), "shared index race: {trees:?}");
+        assert_ne!(trees[0], EMPTY_TREE);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[tauri::command]
+pub async fn checkpoint_create(cwd: String) -> Result<String, String> {
+    write_tree(&cwd)
 }
 
 #[derive(Serialize)]
@@ -202,8 +298,8 @@ pub struct ChangedFile {
 
 /// Files that differ between a checkpoint tree and the working tree right now.
 #[tauri::command]
-pub fn checkpoint_changes(cwd: String, tree: String) -> Result<Vec<ChangedFile>, String> {
-    let now = checkpoint_create(cwd.clone())?;
+pub async fn checkpoint_changes(cwd: String, tree: String) -> Result<Vec<ChangedFile>, String> {
+    let now = write_tree(&cwd)?;
     let out = run(&cwd, &["diff", "--name-status", "-z", &tree, &now])?;
     let mut files = Vec::new();
     let mut it = out.split('\0').filter(|s| !s.is_empty());
@@ -224,7 +320,7 @@ pub fn checkpoint_changes(cwd: String, tree: String) -> Result<Vec<ChangedFile>,
 
 /// File contents as of a checkpoint. Empty string when the file did not exist.
 #[tauri::command]
-pub fn file_at_tree(cwd: String, tree: String, path: String) -> Result<String, String> {
+pub async fn file_at_tree(cwd: String, tree: String, path: String) -> Result<String, String> {
     match run(&cwd, &["show", &format!("{tree}:{path}")]) {
         Ok(s) => Ok(s),
         Err(_) => Ok(String::new()),
@@ -233,7 +329,7 @@ pub fn file_at_tree(cwd: String, tree: String, path: String) -> Result<String, S
 
 /// Unified diff of a single file against HEAD, for the Git panel.
 #[tauri::command]
-pub fn git_file_diff(cwd: String, path: String, staged: bool) -> Result<String, String> {
+pub async fn git_file_diff(cwd: String, path: String, staged: bool) -> Result<String, String> {
     let mut args = vec!["diff"];
     if staged {
         args.push("--staged");

@@ -22,7 +22,7 @@ const SKIP: &[&str] = &[
 
 /// One level only — the tree loads lazily as folders are expanded.
 #[tauri::command]
-pub fn list_dir(path: String) -> Result<Vec<Entry>, String> {
+pub async fn list_dir(path: String) -> Result<Vec<Entry>, String> {
     let mut out = Vec::new();
     let rd = fs::read_dir(&path).map_err(|e| e.to_string())?;
     for item in rd.flatten() {
@@ -42,7 +42,7 @@ pub fn list_dir(path: String) -> Result<Vec<Entry>, String> {
 }
 
 #[tauri::command]
-pub fn read_file(path: String) -> Result<String, String> {
+pub async fn read_file(path: String) -> Result<String, String> {
     let bytes = fs::read(&path).map_err(|e| e.to_string())?;
     if bytes.contains(&0) {
         return Err("binary file".into());
@@ -51,7 +51,7 @@ pub fn read_file(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-pub fn write_file(path: String, contents: String) -> Result<(), String> {
+pub async fn write_file(path: String, contents: String) -> Result<(), String> {
     if let Some(parent) = Path::new(&path).parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -59,7 +59,7 @@ pub fn write_file(path: String, contents: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn delete_file(path: String) -> Result<(), String> {
+pub async fn delete_file(path: String) -> Result<(), String> {
     match fs::remove_file(&path) {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),

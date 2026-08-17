@@ -3,7 +3,7 @@
 A macOS desktop IDE built around the Claude Code CLI you already have installed.
 
 Its reason to exist is the **Changes workspace**: when Claude edits ten files, you
-review the result at whatever granularity you want — a single line, a hunk, a
+review the result at whatever granularity you want — a single line, a block, a
 file, a logical group, or everything — instead of accepting one giant diff.
 
 ## What it does not do
@@ -92,7 +92,7 @@ newly created and deleted files are caught, not just tracked ones. Baseline
 content for any path comes from `git show <tree>:<path>`.
 
 **Decisions.** Each file's diff is stored as one ordered list covering *every*
-line, with display hunks as windows into it. Rebuilding the file is a single walk
+line, with the on-screen blocks as windows into it. Rebuilding the file is a single walk
 over that list, so any subset of decisions still produces a valid file. The rules:
 
 | Decision | Effect on disk |
@@ -109,34 +109,25 @@ Authentication and `auth.test.ts` under Tests. It is a guess, not semantics; the
 grouping function is one pure function and is the obvious place to later ask
 Claude to group changes instead.
 
-## AI orchestration (Phase A)
+## AI features
 
 **Project Intelligence** (`src-tauri/src/intel.rs`) scans the repo on open —
 deterministically, with no model call, so it costs milliseconds and zero tokens.
 Package manager comes from the *lockfile*, not `package.json`, because that is
-the only reliable signal. The result is summarised into a ~100-token brief
-(`src/lib/intel.ts`) prepended to each task's first message.
+the only reliable signal. The result becomes a ~100-token brief prepended to the
+first message of a session, and it measurably changes behaviour: given the brief,
+Claude said *"This repo is tiny (8 files, 27 lines total) — reading directly
+rather than spawning an Explore agent"* instead of burning a turn on discovery.
 
-It changes agent behaviour measurably: given the brief, Claude said *"This repo
-is tiny (8 files, 27 lines total) — reading directly rather than spawning an
-Explore agent"* instead of burning a turn on discovery.
+**Plans are documents, not chat bubbles.** Large requests run through
+`--permission-mode plan` first. The plan opens as a tab beside your files as
+rendered markdown, you select any part of it to attach a comment, and approval is
+the document's own action. Comments are folded into the message Claude executes
+and explicitly override the plan where they conflict — verified end to end: a
+comment asking to rename a constant produced `LOCKOUT_WINDOW_MS` in the diff.
 
-**Tasks** (`src/lib/tasks.ts`) replace one long chat. Each owns its session,
-conversation, activity, checkpoints, baseline and review decisions, so two pieces
-of work never share a review queue.
-
-Tasks run **one at a time**, with a visible queue. Concurrency is not an
-oversight: checkpoints diff the whole working tree, so parallel agents would
-attribute each other's edits to the wrong task and one task's "reject" could
-delete another's work. Real isolation needs worktrees (Phase C).
-
-**Planning** uses `--permission-mode plan`, which is native to Claude Code.
-Large requests plan first, small ones do not (`shouldPlan`, biased towards *not*
-planning — an unwanted plan is friction on every small request). The plan is
-editable, and the edited text is what executes.
-
-Capturing the plan is fiddlier than it looks, and all three of these were found
-by running it:
+Capturing a plan is fiddlier than it looks, and all three of these were found by
+running it:
 
 - Claude Code emits a plan **either** as an `ExitPlanMode` tool call **or** as a
   markdown file under `~/.claude/plans/`. Version 2.1.226 does the latter, and
@@ -144,21 +135,48 @@ by running it:
   payload. Both paths are handled.
 - A `tool_use` event is only the *request*; a plan file does not exist until its
   **result** arrives. Reading on `tool_use` always read a missing file.
-- The gate keys off a `planMode` flag, not a status string, because planning can
-  legitimately take several turns.
+- The plan's filename is derived from the opening line of the prompt, so the
+  request goes first and the project brief second.
 
-**Activity** (`src/lib/activity.ts`) maps raw tool traffic to readable events
-("Read auth.ts", "Ran tests", "10 passed, 2 failed"), each expandable to the raw
-payload. It reads the *output*, not just the exit code — a tool that exits 0
-while its output says tests failed is still shown as failed.
+**Tool permissions.** Claude Code 2.1.226 exposes no `--permission-prompt-tool`,
+but a `PreToolUse` hook can return a `permissionDecision` and that decision is
+honoured. So the IDE runs a loopback HTTP server, generates a hook script that
+POSTs each tool request to it and blocks, and answers with your decision
+(`src-tauri/src/approval.rs`). Declining genuinely prevents the call rather than
+undoing it afterwards. Unanswered requests fail closed after ten minutes, the
+port is ephemeral and 127.0.0.1-only, and the hook lives in a session-scoped
+settings file rather than your own configuration.
 
-**Context sent** shows exactly what we prepend, and is labelled that way on
-purpose. We cannot introspect Claude Code's own context assembly, so a panel
-claiming to show "what Claude knows" would be a confident lie.
+Editing files is allowed by default — reviewing edits afterwards, line by line,
+is the point of this IDE. Running shell commands and network access ask by
+default, and obviously destructive shell (`rm -rf`, `git push`, `sudo`,
+`curl | sh`) always asks regardless of policy.
 
-Session startup is **lean by default** (`--strict-mcp-config`): a full personal
-config measured ~209k tokens of cache creation per session, which a
-task-per-session model multiplies. Toggle it per workspace in the Context panel.
+**`AskUserQuestion` is not supported**, and this is a CLI limitation rather than
+a gap here: the tool is absent from the 31-tool set in headless mode, along with
+`ExitPlanMode`. Claude asks in plain text instead, which appears in the
+conversation.
+
+**Model and usage.** Pick a model per session (aliases, so they keep resolving to
+the current release); switching respawns the CLI with `--resume` to keep the
+thread. Token and cost totals come from `result` events and are labelled as
+*this session only* — the CLI exposes no account balance and we do not invent
+one.
+
+**Smart Git** actions ask Claude about the diff: explain changes, generate a
+commit message (which lands directly in the commit box), group into commits, find
+unrelated modifications, review for defects, draft a PR description. Every prompt
+is read-only by construction; nothing stages, commits or pushes.
+
+**Search** is literal / regex / symbol / filename over `git ls-files`, plus an
+"Ask Claude instead" button for questions like *"where do we validate JWTs?"*.
+There is no embedding index and the UI does not pretend otherwise.
+
+**Terminal** runs your real login shell (`zsh -l -i`) via a generated `ZDOTDIR`
+that sources your own `~/.zshrc` untouched, then layers on completion. The
+previous version spawned a bare non-login shell, which is why completion looked
+missing. Inline suggestions need `zsh-autosuggestions`; if it is absent the
+terminal says so once instead of silently lacking the feature.
 
 ## Architecture
 
@@ -170,22 +188,29 @@ src-tauri/            Rust: process, PTY, git, filesystem
   pty.rs              integrated terminal
   shellenv.rs         resolve the login-shell PATH (a Finder-launched .app
                       otherwise cannot see ~/.local/bin/claude)
+src-tauri/src/approval.rs  loopback server + PreToolUse hook for permissions
+src-tauri/src/search.rs    literal / regex / symbol / filename search
 src/lib/review.ts     the change-review engine — pure, no UI, self-checked
-src/lib/tasks.ts      task model, planning heuristic, plan capture — pure
+src/lib/session.ts    plans, permissions, usage, planning heuristic — pure
 src/lib/activity.ts   tool traffic -> readable events — pure
 src/lib/intel.ts      project brief generation — pure
-src/lib/store.ts      application state, keyed by task
+src/lib/store.ts      application state
 src/components/       UI
 ```
 
-The four `lib/*.ts` modules above are pure and covered by two self-checks:
+The pure `lib/*.ts` modules are covered by two self-checks, and checkpoints by
+`cargo test`:
 
 ```bash
 npx esbuild src/lib/review.selfcheck.ts --bundle --platform=node --format=cjs --outfile=/tmp/rc.cjs && node /tmp/rc.cjs
 ```
 
 ```bash
-npx esbuild src/lib/phasea.selfcheck.ts --bundle --platform=node --format=cjs --outfile=/tmp/pa.cjs && node /tmp/pa.cjs
+npx esbuild src/lib/session.selfcheck.ts --bundle --platform=node --format=cjs --outfile=/tmp/sc.cjs && node /tmp/sc.cjs
+```
+
+```bash
+cd src-tauri && cargo test
 ```
 
 The Claude integration is confined to `claude.rs` plus `lib/ipc.ts`. Swapping in
@@ -213,10 +238,8 @@ committed automatically, and any change is revertible at line granularity.
 - Grouping is path-based, so an unusual layout falls back to top-level directory.
 - No file-system watcher. The change list refreshes when a turn ends or on
   demand.
-- One task executes at a time; parallel agents need Phase C worktrees.
-- `acceptEdits` permits edits but **not** Bash, so Claude cannot run the test
-  suite unattended — it asks instead. Test intelligence in Phase B needs a
-  permission story (Claude Code hooks via `--settings` are the supported route).
+- One conversation per window.
 - Planning depends on model behaviour: Claude sometimes delegates planning to a
-  background subagent and returns no plan. The task then falls back to Ready
-  rather than blocking.
+  background subagent and returns no plan, in which case no approval gate opens.
+- Semantic search is Claude reading the code, not an index.
+- Impact analysis, error intelligence and test intelligence are not built.

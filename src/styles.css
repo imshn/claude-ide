@@ -119,3 +119,116 @@
 .monaco-editor-background {
   background-color: var(--color-panel) !important;
 }
+
+/* Rendered markdown for plan documents. Hand-written rather than a typography
+   plugin: it is one document type with one set of rules. */
+.md {
+  font-size: 13.5px;
+  line-height: 1.65;
+  color: var(--color-fg-muted);
+}
+.md > * + * {
+  margin-top: 0.85em;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4 {
+  color: var(--color-fg);
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+}
+.md h1 {
+  font-size: 21px;
+  margin-top: 0;
+}
+.md h2 {
+  font-size: 16px;
+  margin-top: 1.6em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--color-border-soft);
+}
+.md h3 {
+  font-size: 14px;
+  margin-top: 1.4em;
+}
+.md strong {
+  color: var(--color-fg);
+  font-weight: 600;
+}
+.md a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.87em;
+  background: var(--color-elevated);
+  border: 1px solid var(--color-border-soft);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+  color: var(--color-fg);
+}
+.md pre {
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+.md pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-fg);
+}
+.md ul,
+.md ol {
+  padding-left: 1.35em;
+}
+.md ul {
+  list-style: disc;
+}
+.md ol {
+  list-style: decimal;
+}
+.md li + li {
+  margin-top: 0.3em;
+}
+.md li::marker {
+  color: var(--color-fg-dim);
+}
+.md blockquote {
+  border-left: 2px solid var(--color-accent);
+  padding-left: 0.9em;
+  color: var(--color-fg-dim);
+}
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--color-border);
+}
+.md table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  display: block;
+  overflow-x: auto;
+}
+.md th,
+.md td {
+  border: 1px solid var(--color-border);
+  padding: 5px 9px;
+  text-align: left;
+}
+.md th {
+  background: var(--color-elevated);
+  color: var(--color-fg);
+  font-weight: 600;
+}
+.md ::selection {
+  background: color-mix(in srgb, var(--color-accent) 35%, transparent);
+}

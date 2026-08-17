@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
-import { AlertTriangle, CornerDownLeft, Layers, Loader2, Plus, Square } from 'lucide-react'
-import { useActiveTask, useStore, type ChatItem } from '../lib/store'
+import {
+  AlertTriangle, ChevronDown, CornerDownLeft, FileText, Loader2, Sparkles, Square,
+} from 'lucide-react'
+import { useStore, type ChatItem } from '../lib/store'
 import type { Activity } from '../lib/activity'
-import { STATUS_LABEL } from '../lib/tasks'
+import { compactTokens, MODELS } from '../lib/session'
 import { ActivityRow } from './ActivityFeed'
-import { PlanPanel } from './PlanPanel'
+import { ApprovalCard } from './ApprovalCard'
 import { Button, Empty, Panel } from './ui'
 
 const SUGGESTIONS = [
@@ -17,87 +19,51 @@ const SUGGESTIONS = [
 type Entry = { at: number } & ({ t: 'chat'; item: ChatItem } | { t: 'act'; item: Activity })
 
 export function ChatPanel() {
-  const task = useActiveTask()
-  const root = useStore((s) => s.root)
-  const detection = useStore((s) => s.detection)
-  const newTask = useStore((s) => s.newTask)
-  const sendToActive = useStore((s) => s.sendToActive)
-  const stopTask = useStore((s) => s.stopTask)
+  const {
+    chat, activity, streaming, busy, running, root, detection, plans, approvals,
+  } = useStore()
+  const prompt = useStore((s) => s.prompt)
+  const stop = useStore((s) => s.stop)
+  const openPlan = useStore((s) => s.openPlan)
   const [text, setText] = useState('')
   const scroller = useRef<HTMLDivElement>(null)
 
-  const live = !!task.id
-
-  // One timeline: conversation and tool activity merged by time.
-  const timeline = useMemo<Entry[]>(() => {
-    const entries: Entry[] = [
-      ...task.chat.map((item) => ({ at: item.at, t: 'chat' as const, item })),
-      ...task.activity.map((item) => ({ at: item.at, t: 'act' as const, item })),
-    ]
-    return entries.sort((a, b) => a.at - b.at)
-  }, [task.chat, task.activity])
+  const timeline = useMemo<Entry[]>(
+    () =>
+      [
+        ...chat.map((item) => ({ at: item.at, t: 'chat' as const, item })),
+        ...activity.map((item) => ({ at: item.at, t: 'act' as const, item })),
+      ].sort((a, b) => a.at - b.at),
+    [chat, activity],
+  )
 
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' })
-  }, [timeline.length, task.streaming])
+  }, [timeline.length, streaming, approvals.length])
 
   const submit = () => {
     const t = text.trim()
     if (!t || !root) return
     setText('')
-    // A new request starts a task; follow-ups continue the open one.
-    if (!live || task.status === 'completed') void newTask(t)
-    else void sendToActive(t)
+    void prompt(t)
   }
+
+  const pendingPlan = plans.find((p) => !p.approved)
 
   return (
     <Panel
-      title={live ? task.title : 'Claude Code'}
+      title="Claude Code"
       className="border-l border-border"
       scroll={false}
-      actions={
-        live ? (
-          <>
-            <span
-              className={clsx(
-                'rounded-full px-1.5 py-0.5 text-[10px] font-medium',
-                task.busy ? 'bg-accent-soft text-accent'
-                : task.status === 'review' ? 'bg-pending/15 text-pending'
-                : task.status === 'failed' ? 'bg-del-bg text-del'
-                : 'text-fg-dim',
-              )}
-            >
-              {STATUS_LABEL[task.status]}
-            </span>
-            <Button compact variant="ghost" onClick={() => setText('')} title="New task (⌘⇧N)">
-              <Plus size={12} />
-            </Button>
-          </>
-        ) : (
-          <span
-            className={clsx(
-              'flex items-center gap-1.5 text-[11px]',
-              detection?.found ? 'text-fg-dim' : 'text-del',
-            )}
-          >
-            <span
-              className={clsx(
-                'h-1.5 w-1.5 rounded-full',
-                detection?.found ? 'bg-fg-dim/50' : 'bg-del',
-              )}
-            />
-            {detection?.found ? 'idle' : 'not found'}
-          </span>
-        )
-      }
+      actions={<ModelPicker />}
     >
       <div className="flex h-full min-h-0 flex-col">
         <div ref={scroller} className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
-          {!live && (
+          {!timeline.length && (
             <div className="pt-6">
               <Empty
-                icon={<Layers size={20} />}
-                title={root ? 'Start a task' : 'Open a folder first'}
+                icon={<Sparkles size={20} />}
+                title={root ? 'Ask Claude to work in this repo' : 'Open a folder first'}
                 hint={
                   detection?.found
                     ? 'Large requests get a plan you approve first. Every turn is checkpointed before any file is touched.'
@@ -109,7 +75,7 @@ export function ChatPanel() {
                   {SUGGESTIONS.map((s) => (
                     <button
                       key={s}
-                      onClick={() => void newTask(s)}
+                      onClick={() => void prompt(s)}
                       className="anim w-full rounded-md border border-border px-2.5 py-1.5 text-left text-[11.5px] text-fg-muted hover:border-accent/40 hover:text-fg"
                     >
                       {s}
@@ -121,22 +87,39 @@ export function ChatPanel() {
           )}
 
           {timeline.map((e, i) =>
-            e.t === 'act' ? (
-              <ActivityRow key={e.item.id + i} a={e.item} />
-            ) : (
-              <Message key={i} item={e.item} />
-            ),
+            e.t === 'act' ? <ActivityRow key={e.item.id + i} a={e.item} /> : <Message key={i} item={e.item} />,
           )}
 
-          {task.status === 'plan-ready' && <PlanPanel task={task} />}
+          {pendingPlan && (
+            <button
+              onClick={() => openPlan(pendingPlan.id)}
+              className="anim flex w-full items-center gap-2 rounded-lg border border-accent/35 bg-accent-soft/30 px-2.5 py-2 text-left hover:border-accent/60"
+            >
+              <FileText size={13} className="shrink-0 text-accent" />
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[11.5px] font-medium text-fg">
+                  {pendingPlan.title}
+                </span>
+                <span className="block text-[10.5px] text-fg-dim">
+                  Open the plan to review, comment and approve
+                </span>
+              </span>
+            </button>
+          )}
 
-          {task.streaming && (
+          {approvals.map((a) => (
+            <ApprovalCard key={a.id} request={a} />
+          ))}
+
+          {streaming && (
             <div className="px-0.5 text-[12.5px] leading-relaxed whitespace-pre-wrap text-fg">
-              {task.streaming}
+              {streaming}
               <span className="ml-0.5 inline-block h-3.5 w-[2px] animate-pulse bg-accent align-middle" />
             </div>
           )}
         </div>
+
+        <UsageBar />
 
         <div className="shrink-0 border-t border-border p-2.5">
           <div className="anim rounded-lg border border-border bg-elevated focus-within:border-accent/50">
@@ -155,25 +138,23 @@ export function ChatPanel() {
               rows={3}
               disabled={!root}
               placeholder={
-                !root ? 'Open a folder to begin'
-                : live && task.status !== 'completed' ? 'Reply in this task…'
-                : 'Describe a task…  (⏎ to send, ⇧⏎ for a new line)'
+                root ? 'Describe a change…  (⏎ to send, ⇧⏎ for a new line)' : 'Open a folder to begin'
               }
               className="w-full resize-none bg-transparent px-2.5 py-2 text-[12.5px] text-fg outline-none placeholder:text-fg-dim disabled:opacity-50"
             />
             <div className="flex items-center gap-1.5 px-2 pb-2">
-              {task.busy ? (
+              <span
+                className={clsx(
+                  'h-1.5 w-1.5 shrink-0 rounded-full',
+                  running ? 'bg-add' : 'bg-fg-dim/40',
+                )}
+                title={running ? 'Session running' : 'Idle'}
+              />
+              {busy ? (
                 <>
                   <Loader2 size={12} className="animate-spin text-accent" />
-                  <span className="text-[11px] text-fg-muted">
-                    {task.status === 'planning' ? 'planning…' : 'working…'}
-                  </span>
-                  <Button
-                    compact
-                    variant="outline"
-                    className="ml-auto"
-                    onClick={() => void stopTask(task.id)}
-                  >
+                  <span className="text-[11px] text-fg-muted">working…</span>
+                  <Button compact variant="outline" className="ml-auto" onClick={() => void stop()}>
                     <Square size={10} /> Stop
                   </Button>
                 </>
@@ -193,6 +174,85 @@ export function ChatPanel() {
         </div>
       </div>
     </Panel>
+  )
+}
+
+function ModelPicker() {
+  const model = useStore((s) => s.model)
+  const setModel = useStore((s) => s.setModel)
+  const current = MODELS.find((m) => m.id === model) ?? MODELS[0]
+
+  return (
+    <div className="relative">
+      <select
+        value={model}
+        onChange={(e) => void setModel(e.target.value)}
+        title={current.hint}
+        aria-label="Model"
+        className="anim cursor-pointer appearance-none rounded-md border border-border bg-transparent py-0.5 pr-5 pl-1.5 text-[11px] text-fg-muted outline-none hover:border-fg-dim hover:text-fg"
+      >
+        {MODELS.map((m) => (
+          <option key={m.id} value={m.id} className="bg-elevated">
+            {m.label}
+          </option>
+        ))}
+      </select>
+      <ChevronDown
+        size={10}
+        className="pointer-events-none absolute top-1/2 right-1 -translate-y-1/2 text-fg-dim"
+      />
+    </div>
+  )
+}
+
+/**
+ * What this session has spent. Deliberately not framed as a quota: the CLI
+ * exposes no account balance and we do not guess at one.
+ */
+function UsageBar() {
+  const usage = useStore((s) => s.usage)
+  const [open, setOpen] = useState(false)
+  if (!usage.turns) return null
+
+  const total = usage.input + usage.output + usage.cacheRead + usage.cacheWrite
+
+  return (
+    <div className="shrink-0 border-t border-border-soft bg-elevated/40">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="tnum flex w-full items-center gap-2 px-3 py-1 text-[10.5px] text-fg-dim anim hover:text-fg-muted"
+      >
+        <span>{usage.turns} turn{usage.turns > 1 ? 's' : ''}</span>
+        <span>·</span>
+        <span>{compactTokens(total)} tokens</span>
+        {usage.costUsd > 0 && (
+          <>
+            <span>·</span>
+            <span>${usage.costUsd.toFixed(3)}</span>
+          </>
+        )}
+        <span className="ml-auto">{(usage.ms / 1000).toFixed(0)}s</span>
+        <ChevronDown size={10} className={clsx('anim', open && 'rotate-180')} />
+      </button>
+      {open && (
+        <dl className="tnum grid grid-cols-2 gap-x-3 gap-y-0.5 px-3 pb-2 text-[10.5px]">
+          {[
+            ['Input', usage.input],
+            ['Output', usage.output],
+            ['Cache read', usage.cacheRead],
+            ['Cache write', usage.cacheWrite],
+          ].map(([label, n]) => (
+            <div key={label as string} className="flex justify-between gap-2">
+              <dt className="text-fg-dim">{label}</dt>
+              <dd className="text-fg-muted">{compactTokens(n as number)}</dd>
+            </div>
+          ))}
+          <p className="col-span-2 pt-1 text-[10px] leading-snug text-fg-dim">
+            This session only. Subscription limits live in Claude Code.
+          </p>
+        </dl>
+      )}
+    </div>
   )
 }
 
@@ -229,7 +289,7 @@ function Message({ item }: { item: ChatItem }) {
   return (
     <div className="tnum flex items-center gap-2 py-0.5 text-[10.5px] text-fg-dim">
       <span className="h-px flex-1 bg-border" />
-      {item.ok ? 'turn complete' : 'turn failed'} · {(item.ms / 1000).toFixed(1)}s
+      {item.ok ? 'turn complete' : 'turn failed'} · {((item.ms ?? 0) / 1000).toFixed(1)}s
       <span className="h-px flex-1 bg-border" />
     </div>
   )
