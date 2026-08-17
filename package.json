@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "tauri": "tauri",
     "app": "tauri dev",
-    "dist": "tauri build"
+    "dist": "tauri build",
+    "dist:universal": "tauri build --target universal-apple-darwin"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

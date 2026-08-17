@@ -54,13 +54,28 @@ npx esbuild src/lib/review.selfcheck.ts --bundle --platform=node --format=cjs --
 
 ## Releasing
 
+**GitHub Actions cannot build this repo as-is.** macOS runners are not available
+to free accounts on *private* repositories, so the tagged workflow fails at
+startup with no job ever allocated. Three ways forward:
+
+- Build locally and attach the artifact (below) — no CI needed.
+- Add a spending limit / paid plan for macOS minutes, then the workflow works
+  unchanged.
+- Make the repo public, where macOS runners are free.
+
+Local release, which is how v0.1.0 was cut:
+
 ```bash
-npm version patch && git push --follow-tags
+npm run dist:universal
 ```
 
-The tag triggers `.github/workflows/release.yml`, which builds a universal
-(Apple Silicon + Intel) `.dmg` and attaches it to a **draft** release. Review it,
-then publish.
+```bash
+gh release create v0.1.0 "src-tauri/target/universal-apple-darwin/release/bundle/dmg/Claude IDE_0.1.0_universal.dmg" --title "Claude IDE v0.1.0" --notes "..."
+```
+
+`.github/workflows/release.yml` is kept and is correct — it typechecks, runs both
+self-checks and `cargo test`, then builds a universal `.dmg` into a **draft**
+release. It will start working the moment macOS minutes are available.
 
 Note: on a **private** repo, release assets are not publicly downloadable.
 Colleagues must be collaborators and be signed in, or use
