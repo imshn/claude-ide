@@ -171,6 +171,13 @@ pub async fn git_repo_root(cwd: String) -> Result<String, String> {
     Ok(run(&cwd, &["rev-parse", "--show-toplevel"])?.trim().to_string())
 }
 
+/// Tracked paths, repo-relative. Feeds the `@file` autocomplete.
+#[tauri::command]
+pub async fn git_ls_files(cwd: String) -> Result<Vec<String>, String> {
+    let out = run(&cwd, &["ls-files", "-z"])?;
+    Ok(out.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect())
+}
+
 #[tauri::command]
 pub async fn git_init(cwd: String) -> Result<String, String> {
     run(&cwd, &["init"])
@@ -188,13 +195,15 @@ pub fn write_tree(cwd: &str) -> Result<String, String> {
     // A unique index per call. These commands run concurrently on the async
     // runtime, and a shared per-process index meant one call could delete the
     // index another was mid-way through building — yielding an empty tree id.
+    //
+    // The counter is doing the real work here: a timestamp is not a uniqueness
+    // primitive, and two threads scheduled in the same nanosecond collided
+    // often enough to fail the concurrency test under load.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let idx = std::env::temp_dir().join(format!(
         "claude-ide-index-{}-{}",
         std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     let idx_str = idx.to_string_lossy().to_string();
     let env = [("GIT_INDEX_FILE", idx_str.as_str())];

@@ -71,3 +71,13 @@ pub async fn delete_file(path: String) -> Result<(), String> {
 pub fn path_exists(path: String) -> bool {
     PathBuf::from(path).exists()
 }
+
+/// Reveal a path in Finder, for the tab and file-tree context menus.
+#[tauri::command]
+pub async fn reveal_in_finder(path: String) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("open");
+    crate::shellenv::with_path(&mut cmd);
+    cmd.arg("-R").arg(&path).spawn().map_err(|e| e.to_string())?;
+    Ok(())
+}
+

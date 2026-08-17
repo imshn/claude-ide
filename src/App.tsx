@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import clsx from 'clsx'
-import { Check, Files, GitBranch, GitCompare, Search, Settings, X } from 'lucide-react'
+import { Check, Files, GitBranch, GitCompare, Search, Send, Settings, X } from 'lucide-react'
 import { onApproval, onClaude } from './lib/ipc'
 import { GIT_ASK_LABELS, useStore, type View } from './lib/store'
-import { DEFAULT_POLICY, MODELS, type Policy } from './lib/session'
+import { ApiPanel } from './components/ApiPanel'
+import { DEFAULT_POLICY, EFFORTS, MODELS, type Policy } from './lib/session'
 import { TitleBar } from './components/TitleBar'
 import { FileTree } from './components/FileTree'
 import { ChangesPanel } from './components/ChangesPanel'
@@ -21,6 +22,7 @@ const VIEWS: { id: View; icon: typeof Files; label: string }[] = [
   { id: 'search', icon: Search, label: 'Search' },
   { id: 'changes', icon: GitCompare, label: 'Changes' },
   { id: 'git', icon: GitBranch, label: 'Source control' },
+  { id: 'api', icon: Send, label: 'API' },
 ]
 
 export default function App() {
@@ -61,6 +63,10 @@ export default function App() {
       { id: 'search', label: 'Show Search', keys: '⌘⇧F', run: () => store.set('view', 'search') },
       { id: 'changes', label: 'Show Changes', keys: '⌘2', run: () => store.set('view', 'changes') },
       { id: 'git', label: 'Show Source control', keys: '⌘3', run: () => store.set('view', 'git') },
+      { id: 'api', label: 'Show API workbench', keys: '⌘4', run: () => store.set('view', 'api') },
+      { id: 'api-new', label: 'New API request', run: () => store.newRequest() },
+      { id: 'api-import', label: 'Import Postman collection…', run: () => void store.importCollection() },
+      { id: 'format', label: 'Format document', keys: '⌥⇧F', run: () => void store.formatActive() },
       { id: 'term', label: 'Toggle terminal', keys: '⌘J', run: () => store.set('terminalOpen', !store.terminalOpen) },
       { id: 'rescan', label: 'Rescan project intelligence', run: () => void store.refreshIntel() },
       { id: 'refresh', label: 'Refresh changes', run: () => void store.refreshChanges() },
@@ -72,6 +78,12 @@ export default function App() {
         label: a.label,
         hint: 'git · Claude',
         run: () => void store.askGit(a.id),
+      })),
+      ...EFFORTS.filter((e) => e.id).map((e) => ({
+        id: `effort-${e.id}`,
+        label: `Effort: ${e.label}`,
+        hint: e.hint,
+        run: () => void store.setEffort(e.id),
       })),
       ...MODELS.filter((m) => m.id).map((m) => ({
         id: `model-${m.id}`,
@@ -100,6 +112,7 @@ export default function App() {
       else if (hit('1')) { e.preventDefault(); s.set('view', 'explorer') }
       else if (hit('2')) { e.preventDefault(); s.set('view', 'changes') }
       else if (hit('3')) { e.preventDefault(); s.set('view', 'git') }
+      else if (hit('4')) { e.preventDefault(); s.set('view', 'api') }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -148,6 +161,7 @@ export default function App() {
           {store.view === 'search' && <SearchPanel />}
           {store.view === 'changes' && <ChangesPanel />}
           {store.view === 'git' && <GitPanel />}
+          {store.view === 'api' && <ApiPanel />}
         </aside>
 
         <main className="flex min-w-0 flex-1 flex-col">

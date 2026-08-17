@@ -1,14 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
-import {
-  AlertTriangle, ChevronDown, CornerDownLeft, FileText, Loader2, Sparkles, Square,
-} from 'lucide-react'
+import { AlertTriangle, ChevronDown, FileText, Sparkles } from 'lucide-react'
 import { useStore, type ChatItem } from '../lib/store'
 import type { Activity } from '../lib/activity'
-import { compactTokens, MODELS } from '../lib/session'
+import { compactTokens, EFFORTS, MODELS } from '../lib/session'
 import { ActivityRow } from './ActivityFeed'
+import { Composer } from './Composer'
 import { ApprovalCard } from './ApprovalCard'
-import { Button, Empty, Panel } from './ui'
+import { Empty, Panel } from './ui'
 
 const SUGGESTIONS = [
   'Explain the structure of this repository.',
@@ -19,13 +18,9 @@ const SUGGESTIONS = [
 type Entry = { at: number } & ({ t: 'chat'; item: ChatItem } | { t: 'act'; item: Activity })
 
 export function ChatPanel() {
-  const {
-    chat, activity, streaming, busy, running, root, detection, plans, approvals,
-  } = useStore()
+  const { chat, activity, streaming, root, detection, plans, approvals } = useStore()
   const prompt = useStore((s) => s.prompt)
-  const stop = useStore((s) => s.stop)
   const openPlan = useStore((s) => s.openPlan)
-  const [text, setText] = useState('')
   const scroller = useRef<HTMLDivElement>(null)
 
   const timeline = useMemo<Entry[]>(
@@ -41,13 +36,6 @@ export function ChatPanel() {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' })
   }, [timeline.length, streaming, approvals.length])
 
-  const submit = () => {
-    const t = text.trim()
-    if (!t || !root) return
-    setText('')
-    void prompt(t)
-  }
-
   const pendingPlan = plans.find((p) => !p.approved)
 
   return (
@@ -55,7 +43,12 @@ export function ChatPanel() {
       title="Claude Code"
       className="border-l border-border"
       scroll={false}
-      actions={<ModelPicker />}
+      actions={
+        <>
+          <EffortPicker />
+          <ModelPicker />
+        </>
+      }
     >
       <div className="flex h-full min-h-0 flex-col">
         <div ref={scroller} className="min-h-0 flex-1 space-y-2 overflow-y-auto p-3">
@@ -120,60 +113,37 @@ export function ChatPanel() {
         </div>
 
         <UsageBar />
-
-        <div className="shrink-0 border-t border-border p-2.5">
-          <div className="anim rounded-lg border border-border bg-elevated focus-within:border-accent/50">
-            <textarea
-              spellCheck={false}
-              autoCorrect="off"
-              autoCapitalize="off"
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  submit()
-                }
-              }}
-              rows={3}
-              disabled={!root}
-              placeholder={
-                root ? 'Describe a change…  (⏎ to send, ⇧⏎ for a new line)' : 'Open a folder to begin'
-              }
-              className="w-full resize-none bg-transparent px-2.5 py-2 text-[12.5px] text-fg outline-none placeholder:text-fg-dim disabled:opacity-50"
-            />
-            <div className="flex items-center gap-1.5 px-2 pb-2">
-              <span
-                className={clsx(
-                  'h-1.5 w-1.5 shrink-0 rounded-full',
-                  running ? 'bg-add' : 'bg-fg-dim/40',
-                )}
-                title={running ? 'Session running' : 'Idle'}
-              />
-              {busy ? (
-                <>
-                  <Loader2 size={12} className="animate-spin text-accent" />
-                  <span className="text-[11px] text-fg-muted">working…</span>
-                  <Button compact variant="outline" className="ml-auto" onClick={() => void stop()}>
-                    <Square size={10} /> Stop
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  variant="accent"
-                  compact
-                  className="ml-auto"
-                  disabled={!text.trim() || !root}
-                  onClick={submit}
-                >
-                  Send <CornerDownLeft size={11} />
-                </Button>
-              )}
-            </div>
-          </div>
-        </div>
+        <Composer />
       </div>
     </Panel>
+  )
+}
+
+function EffortPicker() {
+  const effort = useStore((s) => s.effort)
+  const setEffort = useStore((s) => s.setEffort)
+  const current = EFFORTS.find((e) => e.id === effort) ?? EFFORTS[0]
+
+  return (
+    <div className="relative">
+      <select
+        value={effort}
+        onChange={(e) => void setEffort(e.target.value)}
+        title={`Reasoning effort — ${current.hint}`}
+        aria-label="Effort"
+        className="anim cursor-pointer appearance-none rounded-md border border-border bg-transparent py-0.5 pr-5 pl-1.5 text-[11px] text-fg-muted outline-none hover:border-fg-dim hover:text-fg"
+      >
+        {EFFORTS.map((e) => (
+          <option key={e.id} value={e.id} className="bg-elevated">
+            {e.label}
+          </option>
+        ))}
+      </select>
+      <ChevronDown
+        size={10}
+        className="pointer-events-none absolute top-1/2 right-1 -translate-y-1/2 text-fg-dim"
+      />
+    </div>
   )
 }
 

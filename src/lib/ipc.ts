@@ -41,6 +41,7 @@ export const fs = {
   read: (path: string) => invoke<string>('read_file', { path }),
   write: (path: string, contents: string) => invoke<void>('write_file', { path, contents }),
   remove: (path: string) => invoke<void>('delete_file', { path }),
+  reveal: (path: string) => invoke<void>('reveal_in_finder', { path }),
   exists: (path: string) => invoke<boolean>('path_exists', { path }),
 }
 
@@ -54,6 +55,8 @@ export const git = {
   log: (cwd: string, limit: number) => invoke<Commit[]>('git_log', { cwd, limit }),
   root: (cwd: string) => invoke<string>('git_repo_root', { cwd }),
   init: (cwd: string) => invoke<string>('git_init', { cwd }),
+  lsFiles: async (cwd: string) =>
+    (await invoke<string[]>('git_ls_files', { cwd })) ?? [],
   fileDiff: (cwd: string, path: string, staged: boolean) =>
     invoke<string>('git_file_diff', { cwd, path, staged }),
 }
@@ -89,6 +92,55 @@ export const search = {
     invoke<SearchResults>('repo_search', { root, query, mode, caseSensitive }),
 }
 
+export interface Blob {
+  mime: string
+  base64: string
+  size: number
+  kind: 'image' | 'svg' | 'video' | 'audio' | 'pdf' | 'binary' | 'text'
+}
+
+export const media = {
+  read: (path: string) => invoke<Blob>('read_binary', { path }),
+  kind: (path: string) => invoke<[string, string]>('media_kind', { path }),
+}
+
+export interface Skill {
+  name: string
+  description: string
+  user_invocable: boolean
+  source: string
+}
+
+export const skills = {
+  list: (cwd?: string) => invoke<Skill[]>('list_skills', { cwd }),
+}
+
+export interface ApiWire {
+  method: string
+  url: string
+  headers: { key: string; value: string; enabled: boolean }[]
+  body?: string
+  followRedirects?: boolean
+  timeoutSecs?: number
+  insecure?: boolean
+}
+
+export interface ApiResponseWire {
+  status: number
+  statusText: string
+  headers: { key: string; value: string }[]
+  body: string
+  bodyIsBinary: boolean
+  contentType: string
+  ms: number
+  size: number
+}
+
+export const api = {
+  send: (req: ApiWire) => invoke<ApiResponseWire>('api_send', { req }),
+  readJson: (path: string) => invoke<string>('read_json_file', { path }),
+}
+
 export const approval = {
   setup: () => invoke<string>('approval_setup'),
   respond: (id: string, allow: boolean, reason: string) =>
@@ -105,6 +157,14 @@ export interface ApprovalEvent {
 export const onApproval = (cb: (e: ApprovalEvent) => void) =>
   listen<ApprovalEvent>('approval', (e) => cb(e.payload))
 
+export interface WireAttachment {
+  name: string
+  kind: string
+  mime: string
+  base64?: string
+  text?: string
+}
+
 export const claude = {
   detect: (overridePath?: string) => invoke<Detection>('claude_detect', { overridePath }),
   start: (opts: {
@@ -116,8 +176,10 @@ export const claude = {
     resume?: string
     lean?: boolean
     settings?: string
+    effort?: string
   }) => invoke<void>('claude_start', opts),
-  send: (id: string, text: string) => invoke<void>('claude_send', { id, text }),
+  send: (id: string, text: string, attachments?: WireAttachment[]) =>
+    invoke<void>('claude_send', { id, text, attachments }),
   stop: (id: string) => invoke<void>('claude_stop', { id }),
   running: (id: string) => invoke<boolean>('claude_running', { id }),
 }

@@ -183,6 +183,30 @@ commit message (which lands directly in the commit box), group into commits, fin
 unrelated modifications, review for defects, draft a PR description. Every prompt
 is read-only by construction; nothing stages, commits or pushes.
 
+**Media** files open in a viewer rather than as mojibake: images, SVG (with a
+source toggle), video, audio and PDF, on a checkerboard so transparency is
+visible. Attach any of them to chat by paperclip, drag-and-drop, paste, or a
+tab's context menu — images are sent as vision blocks and Claude genuinely reads
+them (verified: it read text out of a PNG attached in the app).
+
+**Effort** (`--effort low|medium|high|xhigh|max`) sits beside the model picker;
+changing either respawns the CLI with `--resume` so the thread survives.
+
+**`@` and `/` in chat.** `@` completes repo files (ranked so `authsvc` finds
+`authService.ts`) and expands to a backticked path Claude can act on. `/`
+completes your installed skills and invokes them — verified working in headless
+mode. Only `user-invocable` skills are offered.
+
+**Prettier** formats the open file with ⌥⇧F, honouring the repo's own
+`.prettierrc` or `package.json` block rather than imposing this app's defaults.
+
+**API workbench** — build and send requests inside the IDE, with headers, bodies,
+`{{variables}}`, timing, size and pretty-printed JSON. Import a Postman v2
+collection (folders, auth, bodies and all) or an environment export. Imported
+pre-request and test scripts are **preserved but never executed** — running
+arbitrary JavaScript out of a downloaded file is not something an IDE should do
+quietly — and any request carrying one says so.
+
 **Search** is literal / regex / symbol / filename over `git ls-files`, plus an
 "Ask Claude instead" button for questions like *"where do we validate JWTs?"*.
 There is no embedding index and the UI does not pretend otherwise.

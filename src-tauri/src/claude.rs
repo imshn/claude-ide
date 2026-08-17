@@ -126,6 +126,8 @@ pub fn claude_start(
     lean: Option<bool>,
     // Path to the generated settings file carrying the approval hook.
     settings: Option<String>,
+    // low | medium | high | xhigh | max
+    effort: Option<String>,
 ) -> Result<(), String> {
     let mut map = state.0.lock().map_err(|e| e.to_string())?;
     if map.contains_key(&id) {
@@ -153,6 +155,9 @@ pub fn claude_start(
     }
     if let Some(s) = settings.filter(|s| !s.is_empty()) {
         cmd.args(["--settings", &s]);
+    }
+    if let Some(e) = effort.filter(|e| !e.is_empty()) {
+        cmd.args(["--effort", &e]);
     }
     if let Some(m) = model.filter(|m| !m.is_empty()) {
         cmd.args(["--model", &m]);
@@ -201,14 +206,53 @@ pub fn claude_start(
     Ok(())
 }
 
+/// A file the user attached in chat.
+#[derive(serde::Deserialize)]
+pub struct Attachment {
+    pub name: String,
+    /// "image" sends a vision block; anything else is inlined as text.
+    pub kind: String,
+    pub mime: String,
+    pub base64: Option<String>,
+    pub text: Option<String>,
+}
+
 #[tauri::command]
-pub fn claude_send(state: State<Sessions>, id: String, text: String) -> Result<(), String> {
+pub fn claude_send(
+    state: State<Sessions>,
+    id: String,
+    text: String,
+    attachments: Option<Vec<Attachment>>,
+) -> Result<(), String> {
     let mut map = state.0.lock().map_err(|e| e.to_string())?;
     let session = map.get_mut(&id).ok_or("no such session")?;
-    let payload = serde_json::json!({
-        "type": "user",
-        "message": { "role": "user", "content": [{ "type": "text", "text": text }] }
-    });
+
+    let mut content: Vec<serde_json::Value> = Vec::new();
+    if !text.trim().is_empty() {
+        content.push(serde_json::json!({ "type": "text", "text": text }));
+    }
+
+    // Verified against 2.1.226: base64 image blocks on stdin reach the model —
+    // it read text out of a PNG sent this way.
+    for a in attachments.unwrap_or_default() {
+        match (a.kind.as_str(), a.base64, a.text) {
+            ("image", Some(data), _) => content.push(serde_json::json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": a.mime, "data": data },
+            })),
+            (_, _, Some(body)) => content.push(serde_json::json!({
+                "type": "text",
+                "text": format!("Attached file `{}`:\n\n{}", a.name, body),
+            })),
+            _ => {}
+        }
+    }
+    if content.is_empty() {
+        return Ok(());
+    }
+
+    let payload =
+        serde_json::json!({ "type": "user", "message": { "role": "user", "content": content } });
     writeln!(session.stdin, "{payload}").map_err(|e| e.to_string())?;
     session.stdin.flush().map_err(|e| e.to_string())
 }

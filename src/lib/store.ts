@@ -10,16 +10,31 @@ import {
   type Group,
 } from './review'
 import {
+  api as apiIpc,
   approval,
   checkpoint,
   claude,
   fs,
   git,
   intel as intelApi,
+  media,
   relative,
+  skills as skillsIpc,
   type Detection,
   type RepoStatus,
+  type Skill,
 } from './ipc'
+import { expandMentions } from './mentions'
+import {
+  blankRequest,
+  flatten,
+  interpolate,
+  parseCollection,
+  parseEnvironment,
+  type ApiRequest,
+  type TreeNode,
+} from './postman'
+import { canFormat, format, readConfig } from './format'
 import { activityFor, applyResult, type Activity } from './activity'
 import { projectCard, type Intel } from './intel'
 import {
@@ -41,8 +56,22 @@ import {
   type Usage,
 } from './session'
 
-export type View = 'explorer' | 'changes' | 'git' | 'search'
-export type Tab = { kind: 'file'; path: string } | { kind: 'plan'; id: string }
+export type View = 'explorer' | 'changes' | 'git' | 'search' | 'api'
+export type Tab =
+  | { kind: 'file'; path: string }
+  | { kind: 'plan'; id: string }
+  | { kind: 'api'; id: string }
+
+export interface Attachment {
+  id: string
+  name: string
+  path?: string
+  kind: string
+  mime: string
+  base64?: string
+  text?: string
+  size: number
+}
 export type { ChatItem }
 
 const SESSION = crypto.randomUUID()
@@ -55,6 +84,8 @@ interface State {
   detection: Detection | null
 
   model: string
+  /** low | medium | high | xhigh | max, or '' for the CLI default. */
+  effort: string
   lean: boolean
   settingsPath: string | null
 
@@ -94,6 +125,29 @@ interface State {
   commitDraft: string
   /** When set, the next assistant message is routed somewhere other than chat. */
   capture: 'commit' | null
+
+  attachments: Attachment[]
+  skills: Skill[]
+  /** Repo-relative paths, for @ mentions. */
+  fileIndex: string[]
+  prettierConfig: Record<string, unknown> | null
+
+  collections: { id: string; name: string; tree: TreeNode }[]
+  requests: Record<string, ApiRequest>
+  responses: Record<string, ApiResponse>
+  looseRequests: string[]
+  apiVars: Record<string, string>
+  sendingApi: string | null
+}
+
+export interface ApiResponse {
+  status: number
+  statusText: string
+  headers: { key: string; value: string }[]
+  body: string
+  contentType: string
+  ms: number
+  size: number
 }
 
 export type GitAsk =
@@ -143,6 +197,20 @@ interface Actions {
 
   askGit: (kind: GitAsk) => Promise<void>
   setCommitDraft: (s: string) => void
+
+  setEffort: (e: string) => Promise<void>
+  attachPaths: (paths: string[]) => Promise<void>
+  attachRaw: (name: string, mime: string, base64: string) => void
+  removeAttachment: (id: string) => void
+  loadSkills: () => Promise<void>
+  loadFileIndex: () => Promise<void>
+  formatActive: () => Promise<void>
+
+  importCollection: () => Promise<void>
+  newRequest: () => void
+  openRequest: (id: string) => void
+  updateRequest: (id: string, patch: Partial<ApiRequest>) => void
+  sendRequest: (id: string) => Promise<void>
 
   set: <K extends keyof State>(k: K, v: State[K]) => void
   note: (text: string) => void
@@ -206,7 +274,7 @@ export const useStore = create<State & Actions>((setState, get) => {
   /** Spawn or respawn the CLI. Permission mode and model are fixed per process,
    *  so changing either means a respawn with --resume to keep the thread. */
   const spawn = async (permissionMode: string): Promise<boolean> => {
-    const { root, detection, lean, model, claudeSessionId } = get()
+    const { root, detection, lean, model, effort, claudeSessionId } = get()
     if (!root || !detection?.found) {
       say({ kind: 'notice', tone: 'error', text: 'Claude Code was not found. Set its path in Settings (⌘,).' })
       return false
@@ -225,6 +293,7 @@ export const useStore = create<State & Actions>((setState, get) => {
         permissionMode,
         lean,
         model,
+        effort,
         resume: claudeSessionId,
         settings: settingsPath ?? undefined,
       })
@@ -237,15 +306,39 @@ export const useStore = create<State & Actions>((setState, get) => {
     }
   }
 
-  const send = async (text: string) => {
+  const send = async (text: string, attachments: Attachment[] = []) => {
     const tree = await get().snapshot(text.slice(0, 60))
     setState({ busy: true, streaming: '', baseTree: tree ?? get().baseTree })
     try {
-      await claude.send(SESSION, text)
+      await claude.send(
+        SESSION,
+        text,
+        attachments.map((a) => ({
+          name: a.name,
+          kind: a.kind,
+          mime: a.mime,
+          base64: a.base64,
+          text: a.text,
+        })),
+      )
     } catch (e) {
       setState({ busy: false })
       say({ kind: 'notice', tone: 'error', text: String(e) })
     }
+  }
+
+  /** Honour the repo's own prettier settings rather than imposing ours. */
+  async function loadPrettierConfig(root: string) {
+    for (const [file, fromPkg] of [
+      ['.prettierrc', false],
+      ['.prettierrc.json', false],
+      ['package.json', true],
+    ] as const) {
+      const raw = await fs.read(`${root}/${file}`).catch(() => null)
+      const cfg = raw && readConfig(raw, fromPkg)
+      if (cfg) return setState({ prettierConfig: cfg })
+    }
+    setState({ prettierConfig: null })
   }
 
   async function capturePlan(found: { inline?: string; path?: string }) {
@@ -280,6 +373,7 @@ export const useStore = create<State & Actions>((setState, get) => {
     intelLoading: false,
     detection: null,
     model: '',
+    effort: '',
     lean: true,
     settingsPath: null,
     running: false,
@@ -310,6 +404,16 @@ export const useStore = create<State & Actions>((setState, get) => {
     status: 'Ready',
     commitDraft: '',
     capture: null,
+    attachments: [],
+    skills: [],
+    fileIndex: [],
+    prettierConfig: null,
+    collections: [],
+    requests: {},
+    responses: {},
+    looseRequests: [],
+    apiVars: {},
+    sendingApi: null,
 
     setCommitDraft: (s) => setState({ commitDraft: s }),
 
@@ -318,6 +422,209 @@ export const useStore = create<State & Actions>((setState, get) => {
       if (!get().root) return
       setState({ capture: ask.capture ?? null })
       await get().prompt(ask.prompt)
+    },
+
+
+    // -- chat attachments, skills, formatting -------------------------------
+    async setEffort(e) {
+      setState({ effort: e })
+      if (get().running) {
+        await spawn(get().planMode ? 'plan' : 'acceptEdits')
+        setState({ status: `Effort: ${e || 'default'}` })
+      }
+    },
+
+    /** Attach files by path — from the picker, a drop, or the file tree. */
+    async attachPaths(paths) {
+      const added: Attachment[] = []
+      for (const path of paths) {
+        try {
+          const blob = await media.read(path)
+          const name = path.split('/').pop() ?? path
+          added.push(
+            blob.kind === 'image'
+              ? { id: crypto.randomUUID(), name, path, kind: 'image', mime: blob.mime, base64: blob.base64, size: blob.size }
+              : {
+                  id: crypto.randomUUID(),
+                  name,
+                  path,
+                  kind: 'text',
+                  mime: blob.mime,
+                  // Non-images go as text; binaries would be noise to the model.
+                  text: blob.kind === 'binary' ? undefined : await fs.read(path).catch(() => undefined),
+                  size: blob.size,
+                },
+          )
+        } catch (e) {
+          setState({ status: `Cannot attach ${path.split('/').pop()}: ${e}` })
+        }
+      }
+      const usable = added.filter((a) => a.kind === 'image' || a.text)
+      if (usable.length < added.length) {
+        setState({ status: 'Skipped a binary file — Claude cannot read it' })
+      }
+      setState({ attachments: [...get().attachments, ...usable] })
+    },
+
+    /** Attach something pasted or dropped that never had a path. */
+    attachRaw(name, mime, base64) {
+      setState({
+        attachments: [
+          ...get().attachments,
+          {
+            id: crypto.randomUUID(),
+            name,
+            kind: mime.startsWith('image/') ? 'image' : 'text',
+            mime,
+            base64,
+            size: Math.floor((base64.length * 3) / 4),
+          },
+        ],
+      })
+    },
+
+    removeAttachment: (id) => setState({ attachments: get().attachments.filter((a) => a.id !== id) }),
+
+    async loadSkills() {
+      try {
+        const all = await skillsIpc.list(get().root ?? undefined)
+        // Model-only skills would be dead entries in a `/` menu.
+        setState({ skills: all.filter((s) => s.user_invocable) })
+      } catch {
+        setState({ skills: [] })
+      }
+    },
+
+    async loadFileIndex() {
+      const root = get().root
+      if (!root) return
+      try {
+        const out = await git.lsFiles(root)
+        setState({ fileIndex: out })
+      } catch {
+        setState({ fileIndex: [] })
+      }
+    },
+
+    async formatActive() {
+      const tab = get().activeTab
+      if (tab?.kind !== 'file') return setState({ status: 'Nothing to format' })
+      const path = tab.path
+      if (!canFormat(path)) return setState({ status: `No formatter for ${path.split('/').pop()}` })
+      try {
+        const next = await format(path, get().contents[path] ?? '', get().prettierConfig)
+        if (next === get().contents[path]) return setState({ status: 'Already formatted' })
+        await get().saveFile(path, next)
+        setState({ status: 'Formatted' })
+      } catch (e) {
+        setState({ status: `Format failed: ${String(e).split('\n')[0]}` })
+      }
+    },
+
+    // -- API workbench ------------------------------------------------------
+    async importCollection() {
+      const { open } = await import('@tauri-apps/plugin-dialog')
+      const picked = await open({
+        multiple: true,
+        filters: [{ name: 'Postman export', extensions: ['json'] }],
+      })
+      const paths = Array.isArray(picked) ? picked : picked ? [picked] : []
+      let imported = 0
+
+      for (const path of paths) {
+        try {
+          const raw = await apiIpc.readJson(path)
+          // An environment export has `values` and no `item`.
+          if (/"values"\s*:/.test(raw) && !/"item"\s*:/.test(raw)) {
+            setState({ apiVars: { ...get().apiVars, ...parseEnvironment(raw) } })
+            setState({ status: 'Imported environment variables' })
+            continue
+          }
+          const parsed = parseCollection(raw)
+          const { tree, requests } = flatten(parsed.root)
+          setState({
+            collections: [...get().collections, { id: parsed.id, name: parsed.name, tree }],
+            requests: { ...get().requests, ...requests },
+            apiVars: { ...parsed.variables, ...get().apiVars },
+          })
+          imported += Object.keys(requests).length
+        } catch (e) {
+          setState({ status: `Import failed: ${e}` })
+          return
+        }
+      }
+      if (imported) setState({ status: `Imported ${imported} request${imported === 1 ? '' : 's'}` })
+    },
+
+    newRequest() {
+      const req = blankRequest()
+      setState({
+        requests: { ...get().requests, [req.id]: req },
+        looseRequests: [...get().looseRequests, req.id],
+      })
+      get().openRequest(req.id)
+    },
+
+    openRequest(id) {
+      const tab: Tab = { kind: 'api', id }
+      const exists = get().tabs.some((t) => t.kind === 'api' && t.id === id)
+      setState({ tabs: exists ? get().tabs : [...get().tabs, tab], activeTab: tab })
+    },
+
+    updateRequest(id, patch) {
+      const req = get().requests[id]
+      if (!req) return
+      setState({ requests: { ...get().requests, [id]: { ...req, ...patch } } })
+    },
+
+    async sendRequest(id) {
+      const req = get().requests[id]
+      if (!req) return
+      const vars = get().apiVars
+      setState({ sendingApi: id })
+      try {
+        const res = await apiIpc.send({
+          method: req.method,
+          url: interpolate(req.url, vars),
+          headers: req.headers
+            .filter((h) => h.enabled && h.key.trim())
+            .map((h) => ({ key: h.key, value: interpolate(h.value, vars), enabled: true })),
+          body: req.bodyType === 'none' ? undefined : interpolate(req.body, vars),
+        })
+        setState({
+          responses: {
+            ...get().responses,
+            [id]: {
+              status: res.status,
+              statusText: res.statusText,
+              headers: res.headers,
+              body: res.body,
+              contentType: res.contentType,
+              ms: res.ms,
+              size: res.size,
+            },
+          },
+          status: `${req.method} ${res.status} · ${res.ms} ms`,
+        })
+      } catch (e) {
+        setState({
+          responses: {
+            ...get().responses,
+            [id]: {
+              status: 0,
+              statusText: 'Request failed',
+              headers: [],
+              body: String(e),
+              contentType: '',
+              ms: 0,
+              size: 0,
+            },
+          },
+          status: `Request failed: ${String(e).slice(0, 80)}`,
+        })
+      } finally {
+        setState({ sendingApi: null })
+      }
     },
 
     set: (k, v) => setState({ [k]: v } as Pick<State, typeof k>),
@@ -360,6 +667,9 @@ export const useStore = create<State & Actions>((setState, get) => {
       })
       await get().refreshRepo()
       void get().refreshIntel()
+      void get().loadSkills()
+      void get().loadFileIndex()
+      void loadPrettierConfig(root)
       const tree = await get().snapshot('Opened workspace')
       setState({ baseTree: tree })
     },
@@ -391,15 +701,25 @@ export const useStore = create<State & Actions>((setState, get) => {
 
     // -- conversation -------------------------------------------------------
     async prompt(text) {
-      const { root, running, planMode } = get()
-      if (!root || !text.trim()) return
+      const { root, running, planMode, attachments } = get()
+      if (!root || (!text.trim() && !attachments.length)) return
+
+      // `@path` becomes a backticked repo path so Claude reads it unambiguously.
+      const { text: mentioned } = expandMentions(text, get().fileIndex)
 
       const { plan, reason } = shouldPlan(text)
       const card = projectCard(get().intel)
       // Only the first message of a session needs the brief.
-      const body = get().chat.length === 0 && card ? `${text}\n\n${card}` : text
+      const body = get().chat.length === 0 && card ? `${mentioned}\n\n${card}` : mentioned
 
-      say({ kind: 'user', text })
+      say({
+        kind: 'user',
+        text: attachments.length
+          ? `${text}\n\n[${attachments.map((a) => a.name).join(', ')}]`
+          : text,
+      })
+      const outgoing = attachments
+      setState({ attachments: [] })
 
       // Plan mode is a property of the process, so switching costs a respawn.
       const wantPlan = plan && !planMode
@@ -408,7 +728,7 @@ export const useStore = create<State & Actions>((setState, get) => {
       if (!running || wantPlan || (planMode && !plan)) {
         if (!(await spawn(wantPlan ? 'plan' : 'acceptEdits'))) return
       }
-      await send(body)
+      await send(body, outgoing)
     },
 
     async stop() {

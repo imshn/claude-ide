@@ -60,6 +60,16 @@ export const MODELS: ModelOption[] = [
   { id: 'haiku', label: 'Haiku', hint: 'fastest, cheapest' },
 ]
 
+/** Reasoning effort, passed through as --effort. */
+export const EFFORTS: ModelOption[] = [
+  { id: '', label: 'Effort', hint: "Claude Code's configured default" },
+  { id: 'low', label: 'Low', hint: 'fastest, least thorough' },
+  { id: 'medium', label: 'Medium', hint: 'balanced' },
+  { id: 'high', label: 'High', hint: 'more thorough, slower' },
+  { id: 'xhigh', label: 'X-High', hint: 'harder problems' },
+  { id: 'max', label: 'Max', hint: 'most thorough, slowest' },
+]
+
 // ---------------------------------------------------------------------------
 // Usage. Accumulated from `result` events — this is what this session spent,
 // not an account balance. We have no access to subscription limits and do not

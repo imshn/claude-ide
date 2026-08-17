@@ -2,10 +2,13 @@ mod approval;
 mod claude;
 mod fsops;
 mod git;
+mod http;
 mod intel;
+mod media;
 mod pty;
 mod search;
 mod shellenv;
+mod skills;
 
 pub fn run() {
     tauri::Builder::default()
@@ -19,6 +22,7 @@ pub fn run() {
             fsops::write_file,
             fsops::delete_file,
             fsops::path_exists,
+            fsops::reveal_in_finder,
             git::git_status,
             git::git_stage,
             git::git_unstage,
@@ -28,12 +32,18 @@ pub fn run() {
             git::git_log,
             git::git_repo_root,
             git::git_init,
+            git::git_ls_files,
             git::git_file_diff,
             git::checkpoint_create,
             git::checkpoint_changes,
             git::file_at_tree,
             intel::project_intel,
             search::repo_search,
+            media::read_binary,
+            media::media_kind,
+            skills::list_skills,
+            http::api_send,
+            http::read_json_file,
             approval::approval_setup,
             approval::approval_respond,
             approval::approval_stats,
