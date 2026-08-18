@@ -4,6 +4,7 @@ import { AlertTriangle, ChevronDown, FileText, Sparkles } from 'lucide-react'
 import { useStore, type ChatItem } from '../lib/store'
 import type { Activity } from '../lib/activity'
 import { compactTokens, EFFORTS, MODELS } from '../lib/session'
+import { renderMarkdown } from '../lib/markdown'
 import { ActivityRow } from './ActivityFeed'
 import { Composer } from './Composer'
 import { ApprovalCard } from './ApprovalCard'
@@ -235,10 +236,13 @@ function Message({ item }: { item: ChatItem }) {
     )
   }
   if (item.kind === 'assistant') {
+    // Claude answers in markdown; showing the raw source meant reading literal
+    // asterisks and backticks all day.
     return (
-      <div className="px-0.5 text-[12.5px] leading-relaxed whitespace-pre-wrap text-fg">
-        {item.text}
-      </div>
+      <div
+        className="md md-chat px-0.5"
+        dangerouslySetInnerHTML={{ __html: renderMarkdown(item.text ?? '') }}
+      />
     )
   }
   if (item.kind === 'notice') {

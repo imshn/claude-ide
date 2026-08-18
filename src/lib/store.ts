@@ -35,6 +35,7 @@ import {
   type TreeNode,
 } from './postman'
 import { canFormat, format, readConfig } from './format'
+import { isMediaPath } from './media'
 import { activityFor, applyResult, type Activity } from './activity'
 import { projectCard, type Intel } from './intel'
 import {
@@ -107,7 +108,11 @@ interface State {
   tabs: Tab[]
   activeTab: Tab | null
   contents: Record<string, string>
+  /** Files that are not text; they open in the media viewer. */
+  binaryPaths: string[]
   reveal: { abs: string; line: number } | null
+  /** Code the user sent to chat with ⌘L. */
+  codeSelection: CodeSelection | null
 
   baseTree: string | null
   checkpoints: Checkpoint[]
@@ -138,6 +143,13 @@ interface State {
   looseRequests: string[]
   apiVars: Record<string, string>
   sendingApi: string | null
+}
+
+export interface CodeSelection {
+  path: string
+  from: number
+  to: number
+  text: string
 }
 
 export interface ApiResponse {
@@ -181,6 +193,9 @@ interface Actions {
   discardPlan: (planId: string) => void
 
   openFile: (abs: string) => Promise<void>
+  attachSelection: (sel: CodeSelection) => void
+  openAsText: (abs: string) => Promise<boolean>
+  clearSelection: () => void
   closeTab: (t: Tab) => void
   setActiveTab: (t: Tab | null) => void
   saveFile: (abs: string, text: string) => Promise<void>
@@ -390,7 +405,9 @@ export const useStore = create<State & Actions>((setState, get) => {
     tabs: [],
     activeTab: null,
     contents: {},
+    binaryPaths: [],
     reveal: null,
+    codeSelection: null,
     baseTree: null,
     checkpoints: [],
     files: [],
@@ -648,6 +665,8 @@ export const useStore = create<State & Actions>((setState, get) => {
         tabs: [],
         activeTab: null,
         contents: {},
+        binaryPaths: [],
+        codeSelection: null,
         intel: null,
         chat: [],
         activity: [],
@@ -707,19 +726,30 @@ export const useStore = create<State & Actions>((setState, get) => {
       // `@path` becomes a backticked repo path so Claude reads it unambiguously.
       const { text: mentioned } = expandMentions(text, get().fileIndex)
 
+      // ⌘L selections travel as a fenced block with their real line numbers, so
+      // Claude can act on "these lines" without guessing where they came from.
+      const sel = get().codeSelection
+      const withCode = sel
+        ? `${mentioned}\n\nFrom \`${sel.path}\` lines ${sel.from}-${sel.to}:\n\n\`\`\`\n${sel.text}\n\`\`\``
+        : mentioned
+
       const { plan, reason } = shouldPlan(text)
       const card = projectCard(get().intel)
       // Only the first message of a session needs the brief.
-      const body = get().chat.length === 0 && card ? `${mentioned}\n\n${card}` : mentioned
+      const body = get().chat.length === 0 && card ? `${withCode}\n\n${card}` : withCode
 
       say({
         kind: 'user',
-        text: attachments.length
-          ? `${text}\n\n[${attachments.map((a) => a.name).join(', ')}]`
-          : text,
+        text: [
+          text,
+          sel ? `[${sel.path.split('/').pop()}:${sel.from}-${sel.to}]` : '',
+          attachments.length ? `[${attachments.map((a) => a.name).join(', ')}]` : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
       })
       const outgoing = attachments
-      setState({ attachments: [] })
+      setState({ attachments: [], codeSelection: null })
 
       // Plan mode is a property of the process, so switching costs a respawn.
       const wantPlan = plan && !planMode
@@ -896,18 +926,48 @@ export const useStore = create<State & Actions>((setState, get) => {
     // -- editor -------------------------------------------------------------
     async openFile(abs) {
       const { tabs, contents } = get()
-      if (!(abs in contents)) {
-        try {
-          setState({ contents: { ...contents, [abs]: await fs.read(abs) } })
-        } catch (e) {
-          setState({ status: `Cannot open: ${e}` })
-          return
+      const seen = abs in contents || get().binaryPaths.includes(abs)
+
+      if (!seen) {
+        // Known media never gets a text read. Anything else is tried as text and
+        // falls back to the viewer if it isn't — refusing to open a file the
+        // extension list happens to miss is the bug this replaces.
+        if (isMediaPath(abs)) {
+          setState({ binaryPaths: [...get().binaryPaths, abs] })
+        } else {
+          try {
+            setState({ contents: { ...contents, [abs]: await fs.read(abs) } })
+          } catch {
+            setState({ binaryPaths: [...get().binaryPaths, abs] })
+          }
         }
       }
+
       const tab: Tab = { kind: 'file', path: abs }
       const exists = tabs.some((t) => t.kind === 'file' && t.path === abs)
       setState({ tabs: exists ? tabs : [...tabs, tab], activeTab: tab })
     },
+
+    /** Load a media file's text so it can be edited as source (SVG, mostly). */
+    async openAsText(abs) {
+      if (abs in get().contents) return true
+      try {
+        setState({ contents: { ...get().contents, [abs]: await fs.read(abs) } })
+        return true
+      } catch (e) {
+        setState({ status: `Cannot edit as text: ${e}` })
+        return false
+      }
+    },
+
+    attachSelection(sel) {
+      setState({
+        codeSelection: sel,
+        status: `Sent ${sel.path.split('/').pop()}:${sel.from}-${sel.to} to chat`,
+      })
+    },
+
+    clearSelection: () => setState({ codeSelection: null }),
 
     closeTab(t) {
       const same = (a: Tab, b: Tab) =>

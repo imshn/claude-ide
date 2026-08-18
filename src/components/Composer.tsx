@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import clsx from 'clsx'
-import { CornerDownLeft, Loader2, Paperclip, Square, Upload, X } from 'lucide-react'
+import { Code2, CornerDownLeft, Loader2, Paperclip, Square, Upload, X } from 'lucide-react'
 import { useStore } from '../lib/store'
 import { applyCompletion, detectTrigger, rank, type Trigger } from '../lib/mentions'
 import { MentionPopup, type Suggestion } from './MentionPopup'
@@ -15,12 +15,13 @@ import { Button } from './ui'
  * component made both harder to follow.
  */
 export function Composer() {
-  const { root, busy, running, attachments, fileIndex, skills } = useStore()
+  const { root, busy, running, attachments, fileIndex, skills, codeSelection } = useStore()
   const prompt = useStore((s) => s.prompt)
   const stop = useStore((s) => s.stop)
   const attachPaths = useStore((s) => s.attachPaths)
   const attachRaw = useStore((s) => s.attachRaw)
   const removeAttachment = useStore((s) => s.removeAttachment)
+  const clearSelection = useStore((s) => s.clearSelection)
 
   const [text, setText] = useState('')
   const [caret, setCaret] = useState(0)
@@ -69,7 +70,7 @@ export function Composer() {
   }
 
   const submit = () => {
-    if ((!text.trim() && !attachments.length) || !root) return
+    if ((!text.trim() && !attachments.length && !codeSelection) || !root) return
     const body = text
     setText('')
     setCaret(0)
@@ -133,6 +134,28 @@ export function Composer() {
         </div>
       )}
 
+      {codeSelection && (
+        <div className="mb-1.5 overflow-hidden rounded-md border border-accent/35 bg-accent-soft/25">
+          <div className="flex items-center gap-1.5 px-2 py-1">
+            <Code2 size={11} className="shrink-0 text-accent" />
+            <span className="tnum min-w-0 flex-1 truncate font-mono text-[10.5px] text-accent">
+              {codeSelection.path}:{codeSelection.from}
+              {codeSelection.to !== codeSelection.from && `-${codeSelection.to}`}
+            </span>
+            <button
+              onClick={clearSelection}
+              aria-label="Remove selected code"
+              className="anim rounded p-0.5 text-fg-dim hover:text-del"
+            >
+              <X size={10} />
+            </button>
+          </div>
+          <pre className="max-h-24 overflow-auto border-t border-accent/20 px-2 py-1 font-mono text-[10.5px] leading-snug whitespace-pre text-fg-muted">
+            {codeSelection.text.slice(0, 800)}
+          </pre>
+        </div>
+      )}
+
       {attachments.length > 0 && (
         <div className="mb-1.5 flex flex-wrap gap-1">
           {attachments.map((a) => (
@@ -179,7 +202,9 @@ export function Composer() {
           disabled={!root}
           placeholder={
             root
-              ? 'Describe a change…   @ for files, / for skills, ⏎ to send'
+              ? codeSelection
+                ? 'Ask about the selected code…'
+                : 'Describe a change…   @ for files, / for skills, ⌘L for selection'
               : 'Open a folder to begin'
           }
           className="w-full resize-none bg-transparent px-2.5 py-2 text-[12.5px] text-fg outline-none placeholder:text-fg-dim disabled:opacity-50"
@@ -205,7 +230,7 @@ export function Composer() {
               variant="accent"
               compact
               className="ml-auto"
-              disabled={(!text.trim() && !attachments.length) || !root}
+              disabled={(!text.trim() && !attachments.length && !codeSelection) || !root}
               onClick={submit}
             >
               Send <CornerDownLeft size={11} />

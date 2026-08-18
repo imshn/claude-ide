@@ -5,6 +5,7 @@ import { FileText, Send, X } from 'lucide-react'
 import { fs } from '../lib/ipc'
 import { useStore, type Tab } from '../lib/store'
 import { canFormat } from '../lib/format'
+import { isMediaPath } from '../lib/media'
 import { DiffReview } from './DiffReview'
 import { PlanTab } from './PlanTab'
 import { MediaViewer } from './MediaViewer'
@@ -20,15 +21,13 @@ const LANG: Record<string, string> = {
   cpp: 'cpp', vue: 'html', svelte: 'html', svg: 'xml', xml: 'xml',
 }
 
-/** Extensions that get a viewer instead of a text editor. */
-const MEDIA = /\.(png|jpe?g|gif|webp|avif|bmp|ico|tiff?|heic|heif|jxl|svg|mp4|m4v|webm|mov|mkv|avi|ogv|mp3|wav|m4a|aac|flac|ogg|oga|opus|aiff?|pdf|woff2?|ttf|otf|zip|gz|tar|dmg|wasm)$/i
-
 const langOf = (p: string) => LANG[p.split('.').pop()?.toLowerCase() ?? ''] ?? 'plaintext'
 const sameTab = (a: Tab, b: Tab) =>
   a.kind === b.kind && (a.kind === 'file' ? a.path === (b as any).path : (a as any).id === (b as any).id)
 
 export function EditorPane() {
-  const { tabs, activeTab, contents, view, files, selected, plans, reveal, requests, root } = useStore()
+  const { tabs, activeTab, contents, view, files, selected, plans, reveal, requests, root, binaryPaths } =
+    useStore()
   const setActiveTab = useStore((s) => s.setActiveTab)
   const closeTab = useStore((s) => s.closeTab)
   const saveFile = useStore((s) => s.saveFile)
@@ -36,6 +35,8 @@ export function EditorPane() {
   const formatActive = useStore((s) => s.formatActive)
   const note = useStore((s) => s.note)
   const attachPaths = useStore((s) => s.attachPaths)
+  const attachSelection = useStore((s) => s.attachSelection)
+  const openAsText = useStore((s) => s.openAsText)
 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null)
   const [menu, setMenu] = useState<MenuState | null>(null)
@@ -77,6 +78,32 @@ export function EditorPane() {
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       if (activePath) void saveFile(activePath, editor.getValue())
     })
+
+    // ⌘L sends the selection to chat with its file and line range attached.
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL, () => {
+      const path = activePath
+      const sel = editor.getSelection()
+      const model = editor.getModel()
+      if (!path || !sel || !model) return
+
+      // With no selection, take the caret's line — "ask about this line" is the
+      // common case and an empty chip would be useless.
+      const range = sel.isEmpty()
+        ? { startLineNumber: sel.startLineNumber, endLineNumber: sel.startLineNumber }
+        : sel
+      const text = model.getValueInRange({
+        startLineNumber: range.startLineNumber,
+        endLineNumber: range.endLineNumber,
+        startColumn: 1,
+        endColumn: model.getLineMaxColumn(range.endLineNumber),
+      })
+      attachSelection({
+        path: root && path.startsWith(root + '/') ? path.slice(root.length + 1) : path,
+        from: range.startLineNumber,
+        to: range.endLineNumber,
+        text,
+      })
+    })
     // ⌥⇧F, the shortcut muscle memory already knows.
     editor.addCommand(
       monaco.KeyMod.Alt | monaco.KeyMod.Shift | monaco.KeyCode.KeyF,
@@ -90,6 +117,18 @@ export function EditorPane() {
     () => tabs.filter((t): t is Extract<Tab, { kind: 'file' }> => t.kind === 'file'),
     [tabs],
   )
+
+  /** Media files carry no text until asked for, so load it before switching. */
+  const toggleSource = async (path: string) => {
+    if (asText.has(path)) {
+      return setAsText((s) => {
+        const next = new Set(s)
+        next.delete(path)
+        return next
+      })
+    }
+    if (await openAsText(path)) setAsText((s) => new Set(s).add(path))
+  }
 
   const tabMenu = (t: Tab, x: number, y: number) => {
     const path = t.kind === 'file' ? t.path : null
@@ -157,12 +196,7 @@ export function EditorPane() {
               {
                 id: 'toggle-svg',
                 label: asText.has(path) ? 'Show Preview' : 'Edit Source',
-                run: () =>
-                  setAsText((s) => {
-                    const next = new Set(s)
-                    next.has(path) ? next.delete(path) : next.add(path)
-                    return next
-                  }),
+                run: () => void toggleSource(path),
               },
             ]
           : []),
@@ -187,7 +221,12 @@ export function EditorPane() {
 
   const plan = activeTab?.kind === 'plan' ? plans.find((p) => p.id === activeTab.id) : null
   const apiId = activeTab?.kind === 'api' ? activeTab.id : null
-  const showMedia = !!activePath && MEDIA.test(activePath) && !asText.has(activePath)
+  // Extension match OR "the file could not be read as text" — so a format the
+  // list does not know about still opens instead of erroring.
+  const showMedia =
+    !!activePath &&
+    (isMediaPath(activePath) || binaryPaths.includes(activePath)) &&
+    !asText.has(activePath)
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-panel">
@@ -240,7 +279,7 @@ export function EditorPane() {
         <MediaViewer
           key={activePath}
           path={activePath}
-          onOpenAsText={() => setAsText((s) => new Set(s).add(activePath))}
+          onOpenAsText={() => void toggleSource(activePath)}
         />
       ) : activePath ? (
         <Editor

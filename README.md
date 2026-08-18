@@ -185,7 +185,9 @@ is read-only by construction; nothing stages, commits or pushes.
 
 **Media** files open in a viewer rather than as mojibake: images, SVG (with a
 source toggle), video, audio and PDF, on a checkerboard so transparency is
-visible. Attach any of them to chat by paperclip, drag-and-drop, paste, or a
+visible. The extension list is only a fast path — anything that cannot be read
+as text falls back to the viewer, so a format the list has never heard of still
+opens instead of erroring. Attach any of them to chat by paperclip, drag-and-drop, paste, or a
 tab's context menu — images are sent as vision blocks and Claude genuinely reads
 them (verified: it read text out of a PNG attached in the app).
 
@@ -196,6 +198,10 @@ changing either respawns the CLI with `--resume` so the thread survives.
 `authService.ts`) and expands to a backticked path Claude can act on. `/`
 completes your installed skills and invokes them — verified working in headless
 mode. Only `user-invocable` skills are offered.
+
+**⌘L** sends the selected lines to chat with their file and line range attached,
+so "why is this wrong?" needs no further explanation. With no selection it takes
+the caret's line. Claude's replies render as markdown rather than raw asterisks.
 
 **Prettier** formats the open file with ⌥⇧F, honouring the repo's own
 `.prettierrc` or `package.json` block rather than imposing this app's defaults.
