@@ -38,6 +38,20 @@ pub struct ApiRequest {
     pub timeout_secs: Option<u64>,
     #[serde(default)]
     pub insecure: Option<bool>,
+    /// multipart/form-data fields; `path` set means the field is a file.
+    #[serde(default)]
+    pub form: Vec<FormField>,
+}
+
+#[derive(Deserialize)]
+pub struct FormField {
+    pub key: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "yes")]
+    pub enabled: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -117,7 +131,19 @@ pub async fn api_send(req: ApiRequest) -> Result<ApiResponse, String> {
     for h in req.headers.iter().filter(|h| h.enabled && !h.key.trim().is_empty()) {
         cmd.args(["-H", &format!("{}: {}", h.key.trim(), h.value)]);
     }
-    if let Some(body) = req.body.as_ref().filter(|b| !b.is_empty()) {
+    // Multipart wins over a raw body: curl sets the boundary itself, and
+    // sending both would produce a request with two conflicting bodies.
+    let multipart: Vec<&FormField> =
+        req.form.iter().filter(|f| f.enabled && !f.key.trim().is_empty()).collect();
+    if !multipart.is_empty() {
+        for f in &multipart {
+            let spec = match &f.path {
+                Some(p) if !p.is_empty() => format!("{}=@{}", f.key.trim(), p),
+                _ => format!("{}={}", f.key.trim(), f.value),
+            };
+            cmd.args(["-F", &spec]);
+        }
+    } else if let Some(body) = req.body.as_ref().filter(|b| !b.is_empty()) {
         std::fs::write(&payload_path, body).map_err(|e| e.to_string())?;
         cmd.arg("--data-binary");
         let mut at = std::ffi::OsString::from("@");

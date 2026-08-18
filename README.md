@@ -199,6 +199,18 @@ changing either respawns the CLI with `--resume` so the thread survives.
 completes your installed skills and invokes them — verified working in headless
 mode. Only `user-invocable` skills are offered.
 
+**Debugger.** A real one, not a log-statement helper: breakpoints (click the
+gutter or F9), step in/over/out, call stack, variable inspection and expression
+evaluation, driven over the Chrome DevTools Protocol. Claude can read the paused
+state — stack, scopes, values — and explain what is happening.
+
+The protocol is spoken from the webview because it is JSON over a socket, and
+relaying it through Rust would add a hop without adding anything. Two things
+verified against Node 24 shaped the design: under `--inspect-brk` nothing is
+parsed before the program runs, so breakpoints are set by *file URL* up front
+rather than by waiting for `Debugger.scriptParsed`; and V8 reports percent-encoded
+URLs, so a path containing a space only resolves if it is encoded the same way.
+
 **Multiple cursors and VS Code keybindings.** ⌘D adds the next match, ⌘⇧L selects
 every occurrence, ⌘⌥↑/↓ stack cursors, ⌥click drops one anywhere and ⌥⇧drag makes
 a column selection — Monaco's own implementations, the same ones VS Code uses,

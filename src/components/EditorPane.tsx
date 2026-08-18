@@ -6,6 +6,7 @@ import { fs } from '../lib/ipc'
 import { useStore, type Tab } from '../lib/store'
 import { canFormat } from '../lib/format'
 import { isMediaPath } from '../lib/media'
+import { pathFromUrl } from '../lib/cdp'
 import { DiffReview } from './DiffReview'
 import { PlanTab } from './PlanTab'
 import { MediaViewer } from './MediaViewer'
@@ -42,9 +43,14 @@ export function EditorPane() {
   const attachSelection = useStore((s) => s.attachSelection)
   const openAsText = useStore((s) => s.openAsText)
   const openImpact = useStore((s) => s.openImpact)
+  const toggleBreakpoint = useStore((s) => s.toggleBreakpoint)
+  const breakpoints = useStore((s) => s.breakpoints)
+  const debugFrames = useStore((s) => s.debug.frames)
+  const debugStatus = useStore((s) => s.debug.status)
 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null)
   const [menu, setMenu] = useState<MenuState | null>(null)
+  const decorationsRef = useRef<string[]>([])
   /** SVGs the user chose to edit as text rather than preview. */
   const [asText, setAsText] = useState<Set<string>>(new Set())
 
@@ -76,11 +82,21 @@ export function EditorPane() {
         0,
       )
       useStore.getState().set('cursors', { count: sels.length, chars })
+      useStore.getState().set('cursorLine', sels[0]?.positionLineNumber ?? 0)
     }
     // Also focus here: the effect above runs before Monaco has mounted for a
     // freshly opened file, so its ref is still null at that point.
     editor.focus()
     editor.onDidChangeCursorSelection(report)
+
+    // Clicking the glyph margin toggles a breakpoint, as in VS Code.
+    editor.onMouseDown((e) => {
+      if (e.target.type !== monaco.editor.MouseTargetType.GUTTER_GLYPH_MARGIN) return
+      const line = e.target.position?.lineNumber
+      const path = activePath
+      if (!line || !path || !root) return
+      toggleBreakpoint(path.startsWith(root + '/') ? path.slice(root.length + 1) : path, line)
+    })
     editor.onDidBlurEditorText(() => useStore.getState().set('cursors', { count: 0, chars: 0 }))
     report()
 
@@ -147,6 +163,36 @@ export function EditorPane() {
       () => void formatActive(),
     )
   }
+
+  // Paint breakpoint dots and the paused line. Recomputed whenever either
+  // changes, since Monaco decorations are not derived from React state.
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor || !activePath || !root) return
+    const rel = activePath.startsWith(root + '/') ? activePath.slice(root.length + 1) : activePath
+    const lines = breakpoints[rel] ?? []
+
+    const frame = debugStatus === 'paused' ? debugFrames[0] : undefined
+    const pausedLine =
+      frame && pathFromUrl(frame.url) === activePath ? frame.location.lineNumber + 1 : 0
+
+    const ids = editor.deltaDecorations(
+      decorationsRef.current,
+      [
+        ...lines.map((line) => ({
+          range: { startLineNumber: line, endLineNumber: line, startColumn: 1, endColumn: 1 },
+          options: { glyphMarginClassName: 'bp-dot', glyphMarginHoverMessage: { value: 'Breakpoint' } },
+        })),
+        ...(pausedLine
+          ? [{
+              range: { startLineNumber: pausedLine, endLineNumber: pausedLine, startColumn: 1, endColumn: 1 },
+              options: { isWholeLine: true, className: 'paused-line', glyphMarginClassName: 'paused-arrow' },
+            }]
+          : []),
+      ],
+    )
+    decorationsRef.current = ids
+  }, [breakpoints, activePath, root, debugFrames, debugStatus, contents])
 
   // Every open file is a Monaco model, so cross-file completion works for the
   // files you actually have open.
@@ -354,6 +400,7 @@ export function EditorPane() {
             smoothScrolling: true,
             cursorBlinking: 'smooth',
             padding: { top: 10 },
+            glyphMargin: true,
             guides: { indentation: true },
             scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
             // VS Code parity for multiple cursors: ⌥click adds one, ⌥⇧drag makes a

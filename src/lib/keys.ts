@@ -79,6 +79,13 @@ export const BINDINGS: Binding[] = [
   { id: 'view-2', keys: 'mod+2', label: 'Show Changes', group: 'Navigation' },
   { id: 'view-3', keys: 'mod+3', label: 'Show Source control', group: 'Navigation' },
   { id: 'view-4', keys: 'mod+4', label: 'Show API', group: 'Navigation' },
+  { id: 'view-5', keys: 'mod+5', label: 'Show Debug', group: 'Navigation' },
+  { id: 'dbg-continue', keys: 'f5', label: 'Continue', group: 'Debug' },
+  { id: 'dbg-over', keys: 'f10', label: 'Step over', group: 'Debug' },
+  { id: 'dbg-into', keys: 'f11', label: 'Step into', group: 'Debug' },
+  { id: 'dbg-out', keys: 'shift+f11', label: 'Step out', group: 'Debug' },
+  { id: 'dbg-stop', keys: 'shift+f5', label: 'Stop debugging', group: 'Debug' },
+  { id: 'dbg-toggle-bp', keys: 'f9', label: 'Toggle breakpoint', group: 'Debug' },
   { id: 'next-tab', keys: 'mod+alt+right', label: 'Next tab', group: 'Navigation' },
   { id: 'prev-tab', keys: 'mod+alt+left', label: 'Previous tab', group: 'Navigation' },
 

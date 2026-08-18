@@ -1,5 +1,6 @@
 mod approval;
 mod claude;
+mod debug;
 mod fsops;
 mod git;
 mod http;
@@ -19,6 +20,7 @@ pub fn run() {
         .manage(pty::Terminals::default())
         .manage(approval::Approvals::default())
         .manage(watcher::Watchers::default())
+        .manage(debug::Debuggers::default())
         .invoke_handler(tauri::generate_handler![
             fsops::list_dir,
             fsops::read_file,
@@ -50,6 +52,9 @@ pub fn run() {
             impact::analyze_impact,
             impact::symbol_index,
             impact::symbol_summary,
+            debug::debug_start,
+            debug::debug_stop,
+            debug::debug_running,
             watcher::watch_start,
             watcher::watch_stop,
             approval::approval_setup,

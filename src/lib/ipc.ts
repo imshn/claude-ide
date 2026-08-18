@@ -170,6 +170,23 @@ export const impact = {
   symbols: (root: string, query: string) => invoke<SymbolDef[]>('symbol_index', { root, query }),
 }
 
+export interface DebugTarget {
+  id: string
+  ws_url: string
+  port: number
+  pid: number
+}
+
+export const debug = {
+  start: (opts: { id: string; cwd: string; program: string; args: string[]; runtime?: string }) =>
+    invoke<DebugTarget>('debug_start', opts),
+  stop: (id: string) => invoke<void>('debug_stop', { id }),
+  running: (id: string) => invoke<boolean>('debug_running', { id }),
+}
+
+export const onDebugOutput = (cb: (e: { id: string; stream: string; line: string }) => void) =>
+  listen<{ id: string; stream: string; line: string }>('debug-output', (e) => cb(e.payload))
+
 export const watch = {
   start: (root: string) => invoke<void>('watch_start', { root }),
   stop: () => invoke<void>('watch_stop'),

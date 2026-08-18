@@ -261,3 +261,23 @@
 .md-chat code { font-size: 0.9em; }
 .md-chat ul, .md-chat ol { padding-left: 1.15em; }
 
+/* Debugger gutter and paused line. */
+.bp-dot::after {
+  content: '';
+  display: block;
+  width: 10px;
+  height: 10px;
+  margin: 4px 0 0 3px;
+  border-radius: 50%;
+  background: var(--color-del);
+}
+.paused-arrow::after {
+  content: '\25B6';
+  color: var(--color-pending);
+  font-size: 10px;
+  margin-left: 3px;
+}
+.paused-line {
+  background: color-mix(in srgb, var(--color-pending) 16%, transparent);
+}
+

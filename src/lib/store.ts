@@ -22,6 +22,7 @@ import {
   relative,
   skills as skillsIpc,
   watch,
+  debug as dbg,
   type Detection,
   type RepoStatus,
   type Skill,
@@ -38,6 +39,16 @@ import {
 } from './postman'
 import { canFormat, format, readConfig } from './format'
 import { isMediaPath } from './media'
+import {
+  CdpClient,
+  fileUrl,
+  formatValue,
+  isUserFrame,
+  pathFromUrl,
+  usefulScopes,
+  type CallFrame,
+  type PausedEvent,
+} from './cdp'
 import { activityFor, applyResult, type Activity } from './activity'
 import { projectCard, type Intel } from './intel'
 import {
@@ -59,7 +70,7 @@ import {
   type Usage,
 } from './session'
 
-export type View = 'explorer' | 'changes' | 'git' | 'search' | 'api'
+export type View = 'explorer' | 'changes' | 'git' | 'search' | 'api' | 'debug'
 export type Tab =
   | { kind: 'file'; path: string }
   | { kind: 'plan'; id: string }
@@ -139,6 +150,10 @@ interface State {
 
   /** Live multi-cursor readout for the status bar. */
   cursors: { count: number; chars: number }
+  cursorLine: number
+  debug: DebugState
+  /** Repo-relative path -> 1-based line numbers. */
+  breakpoints: Record<string, number[]>
   sidebarOpen: boolean
   view: View
   paletteOpen: boolean
@@ -176,6 +191,25 @@ export interface DecisionEdit {
   ids: string[]
   /** Previous value per id; undefined means it had no decision. */
   prev: [string, Decision | undefined][]
+}
+
+export interface DebugVar {
+  name: string
+  value: string
+  objectId?: string
+}
+export interface DebugScope {
+  name: string
+  vars: DebugVar[]
+}
+export interface DebugState {
+  status: 'idle' | 'starting' | 'running' | 'paused' | 'stopped'
+  frames: CallFrame[]
+  activeFrame: number
+  scopes: DebugScope[]
+  output: { stream: string; line: string }[]
+  error: string
+  program: string
 }
 
 export interface CodeSelection {
@@ -227,6 +261,12 @@ interface Actions {
 
   openFile: (abs: string) => Promise<void>
   attachSelection: (sel: CodeSelection) => void
+  toggleBreakpoint: (path: string, line: number) => void
+  debugStart: (program: string) => Promise<void>
+  debugStop: () => Promise<void>
+  debugControl: (action: 'resume' | 'stepOver' | 'stepInto' | 'stepOut') => Promise<void>
+  selectFrame: (i: number) => Promise<void>
+  debugEvaluate: (expr: string) => Promise<string>
   openAsText: (abs: string) => Promise<boolean>
   clearSelection: () => void
   closeTab: (t: Tab) => void
@@ -317,6 +357,12 @@ export const GIT_ASK_LABELS = Object.entries(GIT_ASKS).map(([id, v]) => ({
 
 /** tool_use id -> plan path, awaiting the result that actually writes it. */
 const pendingPlans = new Map<string, string>()
+
+/** One debug session per window, held outside the store: it is a live socket,
+ *  not serialisable state. */
+const DEBUG_ID = 'debug-main'
+let cdp: CdpClient | null = null
+let activeBreakpointIds: string[] = []
 
 export const useStore = create<State & Actions>((setState, get) => {
   const now = () => Date.now()
@@ -431,6 +477,75 @@ export const useStore = create<State & Actions>((setState, get) => {
     })
   }
 
+
+  /** Re-apply every breakpoint to the live session, by file URL. */
+  async function syncBreakpoints() {
+    const root = get().root
+    if (!cdp?.connected || !root) return
+    // Clearing first keeps this idempotent; V8 has no "replace all".
+    for (const id of activeBreakpointIds) await cdp.send('Debugger.removeBreakpoint', { breakpointId: id }).catch(() => {})
+    activeBreakpointIds = []
+
+    for (const [rel, lines] of Object.entries(get().breakpoints)) {
+      for (const line of lines) {
+        try {
+          const r = await cdp.send('Debugger.setBreakpointByUrl', {
+            url: fileUrl(`${root}/${rel}`),
+            // CDP counts lines from zero; the editor shows them from one.
+            lineNumber: line - 1,
+            columnNumber: 0,
+          })
+          if (r?.breakpointId) activeBreakpointIds.push(r.breakpointId)
+        } catch {
+          /* a breakpoint in a file that never loads is not an error */
+        }
+      }
+    }
+  }
+
+  async function onPaused(p: PausedEvent) {
+    const frames = p.callFrames.filter((f) => isUserFrame(f.url))
+    const shown = frames.length ? frames : p.callFrames
+    setState({ debug: { ...get().debug, status: 'paused', frames: shown, activeFrame: 0 } })
+    await loadScopes(0)
+
+    // Bring the paused line into view, the way a debugger should.
+    const top = shown[0]
+    if (top?.url?.startsWith('file://')) {
+      const abs = pathFromUrl(top.url)
+      await get().openFile(abs)
+      setState({ reveal: { abs, line: top.location.lineNumber + 1 } })
+    }
+  }
+
+  async function loadScopes(index: number) {
+    const frame = get().debug.frames[index]
+    if (!cdp?.connected || !frame) return
+    const scopes: DebugScope[] = []
+    for (const scope of usefulScopes(frame.scopeChain)) {
+      try {
+        const r = await cdp.send('Runtime.getProperties', {
+          objectId: scope.object.objectId,
+          ownProperties: true,
+          generatePreview: false,
+        })
+        scopes.push({
+          name: scope.name || scope.type,
+          vars: (r.result ?? [])
+            .filter((p: any) => p.enumerable !== false)
+            .map((p: any) => ({
+              name: p.name,
+              value: formatValue(p.value),
+              objectId: p.value?.objectId,
+            })),
+        })
+      } catch {
+        /* a scope that cannot be read is simply not shown */
+      }
+    }
+    setState({ debug: { ...get().debug, scopes } })
+  }
+
   /** Honour the repo's own prettier settings rather than imposing ours. */
   async function loadPrettierConfig(root: string) {
     for (const [file, fromPkg] of [
@@ -509,6 +624,9 @@ export const useStore = create<State & Actions>((setState, get) => {
     written: {},
     selected: null,
     cursors: { count: 0, chars: 0 },
+    cursorLine: 0,
+    debug: { status: 'idle', frames: [], activeFrame: 0, scopes: [], output: [], error: '', program: '' },
+    breakpoints: {},
     sidebarOpen: true,
     view: 'explorer',
     paletteOpen: false,
@@ -771,6 +889,87 @@ export const useStore = create<State & Actions>((setState, get) => {
         })
       } finally {
         setState({ sendingApi: null })
+      }
+    },
+
+
+    // -- debugger -----------------------------------------------------------
+    toggleBreakpoint(path, line) {
+      const cur = get().breakpoints[path] ?? []
+      const next = cur.includes(line) ? cur.filter((l) => l !== line) : [...cur, line].sort((a, b) => a - b)
+      setState({ breakpoints: { ...get().breakpoints, [path]: next } })
+      // Push the change to a live session so it takes effect without a restart.
+      if (cdp?.connected) void syncBreakpoints()
+    },
+
+    async debugStart(program) {
+      const root = get().root
+      if (!root) return
+      await get().debugStop()
+      setState({
+        debug: { status: 'starting', frames: [], activeFrame: 0, scopes: [], output: [], error: '', program },
+      })
+
+      try {
+        const target = await dbg.start({ id: DEBUG_ID, cwd: root, program, args: [] })
+        cdp = new CdpClient()
+        await cdp.connect(target.ws_url)
+
+        cdp.on('Debugger.paused', (p: PausedEvent) => void onPaused(p))
+        cdp.on('Debugger.resumed', () =>
+          setState({ debug: { ...get().debug, status: 'running', frames: [], scopes: [] } }),
+        )
+        cdp.on('__closed', () =>
+          setState({ debug: { ...get().debug, status: 'stopped' } }),
+        )
+
+        await cdp.send('Debugger.enable')
+        await cdp.send('Runtime.enable')
+        await syncBreakpoints()
+        setState({ debug: { ...get().debug, status: 'running' } })
+        // Only now let the program run, so breakpoints are already in place.
+        await cdp.send('Runtime.runIfWaitingForDebugger')
+      } catch (e) {
+        setState({ debug: { ...get().debug, status: 'idle', error: String(e) } })
+      }
+    },
+
+    async debugStop() {
+      cdp?.close()
+      cdp = null
+      await dbg.stop(DEBUG_ID).catch(() => {})
+      setState({ debug: { ...get().debug, status: 'idle', frames: [], scopes: [] } })
+    },
+
+    async debugControl(action) {
+      if (!cdp?.connected) return
+      const map = {
+        resume: 'Debugger.resume',
+        stepOver: 'Debugger.stepOver',
+        stepInto: 'Debugger.stepInto',
+        stepOut: 'Debugger.stepOut',
+      } as const
+      await cdp.send(map[action]).catch(() => {})
+    },
+
+    async selectFrame(i) {
+      setState({ debug: { ...get().debug, activeFrame: i } })
+      await loadScopes(i)
+    },
+
+    async debugEvaluate(expr) {
+      const { frames, activeFrame } = get().debug
+      const frame = frames[activeFrame]
+      if (!cdp?.connected || !frame) return 'not paused'
+      try {
+        const r = await cdp.send('Debugger.evaluateOnCallFrame', {
+          callFrameId: frame.callFrameId,
+          expression: expr,
+          returnByValue: false,
+        })
+        return r.exceptionDetails ? `error: ${r.exceptionDetails.text}` : formatValue(r.result)
+      } catch (e) {
+        return `error: ${e}`
       }
     },
 

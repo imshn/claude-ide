@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import clsx from 'clsx'
-import { Check, Files, GitBranch, GitCompare, Search, Send, Settings, X } from 'lucide-react'
-import { onApproval, onClaude, onFsChanged } from './lib/ipc'
+import { Bug, Check, Files, GitBranch, GitCompare, Search, Send, Settings, X } from 'lucide-react'
+import { onApproval, onClaude, onDebugOutput, onFsChanged } from './lib/ipc'
 import { GIT_ASK_LABELS, useStore, type View } from './lib/store'
 import { ApiPanel } from './components/ApiPanel'
+import { DebugPanel } from './components/DebugPanel'
 import { DEFAULT_POLICY, EFFORTS, MODELS, type Policy } from './lib/session'
 import { TitleBar } from './components/TitleBar'
 import { FileTree } from './components/FileTree'
@@ -26,6 +27,7 @@ const VIEWS: { id: View; icon: typeof Files; label: string }[] = [
   { id: 'changes', icon: GitCompare, label: 'Changes' },
   { id: 'git', icon: GitBranch, label: 'Source control' },
   { id: 'api', icon: Send, label: 'API' },
+  { id: 'debug', icon: Bug, label: 'Debug' },
 ]
 
 export default function App() {
@@ -46,10 +48,17 @@ export default function App() {
     const offApproval = onApproval((r) => useStore.getState().onApproval(r))
     // Debounced in Rust; this just re-derives state from what landed.
     const offFs = onFsChanged((paths) => void useStore.getState().onDiskChanged(paths))
+    const offDbg = onDebugOutput((o) => {
+      const st = useStore.getState()
+      useStore.setState({
+        debug: { ...st.debug, output: [...st.debug.output, { stream: o.stream, line: o.line }].slice(-500) },
+      })
+    })
     return () => {
       void offClaude.then((f) => f())
       void offApproval.then((f) => f())
       void offFs.then((f) => f())
+      void offDbg.then((f) => f())
     }
   }, [])
 
@@ -71,10 +80,40 @@ export default function App() {
       { id: 'changes', label: 'Show Changes', keys: '⌘2', run: () => store.set('view', 'changes') },
       { id: 'git', label: 'Show Source control', keys: '⌘3', run: () => store.set('view', 'git') },
       { id: 'api', label: 'Show API workbench', keys: '⌘4', run: () => store.set('view', 'api') },
+      { id: 'debug-view', label: 'Show Debug', keys: '⌘5', run: () => store.set('view', 'debug') },
+      {
+        id: 'debug-current',
+        label: 'Debug current file',
+        hint: 'run under the inspector',
+        // Read fresh state: `commands` is memoised, so anything captured from
+        // the render-time snapshot is stale by the time the command runs.
+        run: () => {
+          const s = useStore.getState()
+          const t = s.activeTab
+          if (t?.kind !== 'file' || !s.root) return s.note('Open a file to debug')
+          s.set('view', 'debug')
+          void s.debugStart(t.path.startsWith(s.root + '/') ? t.path.slice(s.root.length + 1) : t.path)
+        },
+      },
+      {
+        id: 'debug-toggle-bp',
+        label: 'Toggle breakpoint on current line',
+        keys: 'F9',
+        run: () => {
+          const s = useStore.getState()
+          const t = s.activeTab
+          if (t?.kind !== 'file' || !s.root) return s.note('Open a file first')
+          if (!s.cursorLine) return s.note('Put the caret on a line first')
+          s.toggleBreakpoint(
+            t.path.startsWith(s.root + '/') ? t.path.slice(s.root.length + 1) : t.path,
+            s.cursorLine,
+          )
+        },
+      },
       { id: 'api-new', label: 'New API request', run: () => store.newRequest() },
       { id: 'api-import', label: 'Import Postman collection…', run: () => void store.importCollection() },
       { id: 'format', label: 'Format document', keys: '⌥⇧F', run: () => void store.formatActive() },
-      { id: 'term', label: 'Toggle terminal', keys: '⌘J', run: () => store.set('terminalOpen', !store.terminalOpen) },
+      { id: 'term', label: 'Toggle terminal', keys: '⌘J', run: () => { const s = useStore.getState(); s.set('terminalOpen', !s.terminalOpen) } },
       { id: 'rescan', label: 'Rescan project intelligence', run: () => void store.refreshIntel() },
       { id: 'refresh', label: 'Refresh changes', run: () => void store.refreshChanges() },
       { id: 'checkpoint', label: 'Create checkpoint', hint: 'restore point', run: () => void store.snapshot('Manual checkpoint') },
@@ -146,6 +185,20 @@ export default function App() {
         'view-2': () => s.set('view', 'changes'),
         'view-3': () => s.set('view', 'git'),
         'view-4': () => s.set('view', 'api'),
+        'view-5': () => s.set('view', 'debug'),
+        'dbg-continue': () => void s.debugControl('resume'),
+        'dbg-over': () => void s.debugControl('stepOver'),
+        'dbg-into': () => void s.debugControl('stepInto'),
+        'dbg-out': () => void s.debugControl('stepOut'),
+        'dbg-stop': () => void s.debugStop(),
+        'dbg-toggle-bp': () => {
+          const t = s.activeTab
+          if (t?.kind !== 'file' || !s.root || !s.cursorLine) return
+          s.toggleBreakpoint(
+            t.path.startsWith(s.root + '/') ? t.path.slice(s.root.length + 1) : t.path,
+            s.cursorLine,
+          )
+        },
         'next-tab': () => cycleTab(1),
         'prev-tab': () => cycleTab(-1),
         'close-tab': () => s.activeTab && s.closeTab(s.activeTab),
@@ -234,6 +287,7 @@ export default function App() {
           {store.view === 'changes' && <ChangesPanel />}
           {store.view === 'git' && <GitPanel />}
           {store.view === 'api' && <ApiPanel />}
+          {store.view === 'debug' && <DebugPanel />}
         </aside>
         )}
 
