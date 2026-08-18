@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import clsx from 'clsx'
-import { ChevronDown, ChevronRight, Download, FolderClosed, FolderOpen, Plus, Send } from 'lucide-react'
+import { ChevronDown, ChevronRight, Download, FolderClosed, FolderOpen, Plus, Send, Terminal, X } from 'lucide-react'
 import { useStore } from '../lib/store'
 import type { TreeNode } from '../lib/postman'
 import { Button, Empty, Panel } from './ui'
@@ -16,8 +16,18 @@ const METHOD_TONE: Record<string, string> = {
 export function ApiPanel() {
   const collections = useStore((s) => s.collections)
   const importCollection = useStore((s) => s.importCollection)
+  const importCurl = useStore((s) => s.importCurl)
   const newRequest = useStore((s) => s.newRequest)
   const loose = useStore((s) => s.looseRequests)
+  const [curlOpen, setCurlOpen] = useState(false)
+  const [curlText, setCurlText] = useState('')
+
+  const doImportCurl = () => {
+    if (!curlText.trim()) return
+    importCurl(curlText)
+    setCurlText('')
+    setCurlOpen(false)
+  }
 
   return (
     <Panel
@@ -27,22 +37,48 @@ export function ApiPanel() {
           <Button compact variant="ghost" title="New request" onClick={() => newRequest()}>
             <Plus size={12} />
           </Button>
+          <Button compact variant="ghost" title="Paste a cURL command" onClick={() => setCurlOpen((v) => !v)}>
+            <Terminal size={12} />
+          </Button>
           <Button compact variant="ghost" title="Import a Postman collection" onClick={() => void importCollection()}>
             <Download size={12} />
           </Button>
         </>
       }
     >
+      {curlOpen && (
+        <div className="border-b border-border p-2.5">
+          <div className="mb-1 flex items-center justify-between">
+            <p className="text-[10px] tracking-[0.06em] text-fg-dim uppercase">Paste a cURL command</p>
+            <button onClick={() => setCurlOpen(false)} className="text-fg-dim hover:text-fg">
+              <X size={11} />
+            </button>
+          </div>
+          <textarea
+            value={curlText}
+            onChange={(e) => setCurlText(e.target.value)}
+            spellCheck={false}
+            placeholder="curl -X POST https://api.example.com/v1/users -H 'Authorization: Bearer …' -d '{ }'"
+            className="h-24 w-full resize-y rounded-md border border-border bg-elevated px-2.5 py-2 font-mono text-[11px] text-fg outline-none focus:border-accent/50"
+          />
+          <Button variant="accent" compact className="mt-1.5 w-full justify-center" disabled={!curlText.trim()} onClick={doImportCurl}>
+            Import
+          </Button>
+        </div>
+      )}
       {!collections.length && !loose.length ? (
         <div className="px-3">
           <Empty
             icon={<Send size={20} />}
             title="No requests yet"
-            hint="Create a request, or import a Postman collection export (v2.x JSON)."
+            hint="Create a request, paste a cURL command, or import a Postman collection export (v2.x JSON)."
           />
           <div className="space-y-1.5 pb-4">
             <Button variant="accent" className="w-full justify-center" onClick={() => newRequest()}>
               <Plus size={12} /> New request
+            </Button>
+            <Button variant="outline" className="w-full justify-center" onClick={() => setCurlOpen(true)}>
+              <Terminal size={12} /> Paste cURL command
             </Button>
             <Button variant="outline" className="w-full justify-center" onClick={() => void importCollection()}>
               <Download size={12} /> Import Postman collection

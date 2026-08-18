@@ -233,12 +233,18 @@ the caret's line. Claude's replies render as markdown rather than raw asterisks.
 **Prettier** formats the open file with ⌥⇧F, honouring the repo's own
 `.prettierrc` or `package.json` block rather than imposing this app's defaults.
 
-**API workbench** — build and send requests inside the IDE, with headers, bodies,
-`{{variables}}`, timing, size and pretty-printed JSON. Import a Postman v2
-collection (folders, auth, bodies and all) or an environment export. Imported
-pre-request and test scripts are **preserved but never executed** — running
-arbitrary JavaScript out of a downloaded file is not something an IDE should do
-quietly — and any request carrying one says so.
+**API workbench** — build and send requests inside the IDE: a query-param table
+kept in sync with the URL bar, an auth tab (bearer / basic / API key, header or
+query), multiple named **environments** plus a global-variables scope with
+`{{variables}}` interpolation, multipart file upload, response **assertions**
+(status, timing, header, body-contains, JSON path) with a pass/fail readout,
+per-request **history**, and **code generation** to curl / fetch / axios /
+Python. Paste a cURL command straight in to create a request from it, or import
+a Postman v2 collection (folders, auth, bodies and all) or an environment
+export — each import lands as its own named environment rather than a flat
+dump of variables. Imported pre-request and test scripts are **preserved but
+never executed** — running arbitrary JavaScript out of a downloaded file is not
+something an IDE should do quietly — and any request carrying one says so.
 
 **Search** is literal / regex / filename over `git ls-files`, plus a **symbol
 index** that returns declarations rather than every line containing a word, and
@@ -314,14 +320,16 @@ committed automatically, and any change is revertible at line granularity.
 
 ## Known limits
 
-- Rejecting a line commits that rejection: the next refresh re-derives the diff
-  from disk, so the rejected change is gone from the list. Coarser undo is still
-  available from the checkpoint history.
-- Grouping is path-based, so an unusual layout falls back to top-level directory.
-- No file-system watcher. The change list refreshes when a turn ends or on
-  demand.
 - One conversation per window.
 - Planning depends on model behaviour: Claude sometimes delegates planning to a
   background subagent and returns no plan, in which case no approval gate opens.
-- Semantic search is Claude reading the code, not an index.
-- Impact analysis, error intelligence and test intelligence are not built.
+- Semantic search is Claude reading the code, not an index; impact analysis is
+  lexical, not type-aware (see above).
+- Error intelligence and test intelligence beyond what impact analysis covers
+  are not built.
+- The debugger drives Node's inspector protocol; there is no Python/debugpy
+  backend yet.
+- The API workbench has no GraphQL or WebSocket support (deliberately out of
+  scope) and never executes a collection's pre-request or test scripts.
+- The AI debug loop is one-shot ("Ask Claude about this state"), not an
+  autonomous run-observe-patch-reiterate cycle.

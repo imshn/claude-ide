@@ -33,10 +33,11 @@ import {
   flatten,
   interpolate,
   parseCollection,
-  parseEnvironment,
+  parseEnvironmentNamed,
   type ApiRequest,
   type TreeNode,
 } from './postman'
+import { authHeaders, joinUrl, parseCurl, runAssertions, splitUrl, type AssertionResult } from './apitest'
 import { canFormat, format, readConfig } from './format'
 import { isMediaPath } from './media'
 import {
@@ -90,6 +91,17 @@ export interface Attachment {
 export type { ChatItem }
 
 const SESSION = crypto.randomUUID()
+
+function looksJsonBody(s: string): boolean {
+  const t = s.trim()
+  if (!t.startsWith('{') && !t.startsWith('[')) return false
+  try {
+    JSON.parse(t)
+    return true
+  } catch {
+    return false
+  }
+}
 
 interface State {
   root: string | null
@@ -176,8 +188,28 @@ interface State {
   requests: Record<string, ApiRequest>
   responses: Record<string, ApiResponse>
   looseRequests: string[]
+  /** Global variables, always in scope regardless of the active environment. */
   apiVars: Record<string, string>
+  environments: ApiEnvironment[]
+  activeEnvId: string | null
   sendingApi: string | null
+  testResults: Record<string, AssertionResult[]>
+  history: Record<string, ApiHistoryEntry[]>
+}
+
+export interface ApiEnvironment {
+  id: string
+  name: string
+  vars: Record<string, string>
+}
+
+export interface ApiHistoryEntry {
+  id: string
+  method: string
+  url: string
+  status: number
+  ms: number
+  at: number
 }
 
 export interface Proposal {
@@ -298,11 +330,21 @@ interface Actions {
   formatActive: () => Promise<void>
 
   importCollection: () => Promise<void>
+  importCurl: (cmd: string) => void
   newRequest: () => void
   openRequest: (id: string) => void
   openImpact: (path: string) => void
   updateRequest: (id: string, patch: Partial<ApiRequest>) => void
   sendRequest: (id: string) => Promise<void>
+  activeVars: () => Record<string, string>
+  addEnvironment: (name: string) => string
+  renameEnvironment: (id: string, name: string) => void
+  deleteEnvironment: (id: string) => void
+  setActiveEnv: (id: string | null) => void
+  setEnvVar: (id: string, key: string, value: string) => void
+  removeEnvVar: (id: string, key: string) => void
+  setGlobalVar: (key: string, value: string) => void
+  removeGlobalVar: (key: string) => void
 
   set: <K extends keyof State>(k: K, v: State[K]) => void
   note: (text: string) => void
@@ -645,7 +687,11 @@ export const useStore = create<State & Actions>((setState, get) => {
     responses: {},
     looseRequests: [],
     apiVars: {},
+    environments: [],
+    activeEnvId: null,
     sendingApi: null,
+    testResults: {},
+    history: {},
 
     setCommitDraft: (s) => setState({ commitDraft: s }),
 
@@ -795,8 +841,13 @@ export const useStore = create<State & Actions>((setState, get) => {
           const raw = await apiIpc.readJson(path)
           // An environment export has `values` and no `item`.
           if (/"values"\s*:/.test(raw) && !/"item"\s*:/.test(raw)) {
-            setState({ apiVars: { ...get().apiVars, ...parseEnvironment(raw) } })
-            setState({ status: 'Imported environment variables' })
+            const { name, vars } = parseEnvironmentNamed(raw)
+            const id = crypto.randomUUID()
+            setState({
+              environments: [...get().environments, { id, name, vars }],
+              activeEnvId: id,
+              status: `Imported environment "${name}"`,
+            })
             continue
           }
           const parsed = parseCollection(raw)
@@ -824,6 +875,26 @@ export const useStore = create<State & Actions>((setState, get) => {
       get().openRequest(req.id)
     },
 
+    importCurl(cmd) {
+      try {
+        const parsed = parseCurl(cmd)
+        const req = blankRequest(parsed.url.replace(/^https?:\/\//, '').split('/')[0] || 'Imported request')
+        req.method = parsed.method
+        req.url = parsed.url
+        req.headers = [...parsed.headers, { key: '', value: '', enabled: true }]
+        req.body = parsed.body
+        req.bodyType = parsed.body ? (looksJsonBody(parsed.body) ? 'json' : 'text') : 'none'
+        setState({
+          requests: { ...get().requests, [req.id]: req },
+          looseRequests: [...get().looseRequests, req.id],
+          status: 'Imported from cURL',
+        })
+        get().openRequest(req.id)
+      } catch (e) {
+        setState({ status: `cURL import failed: ${e}` })
+      }
+    },
+
     openImpact(path) {
       const tab: Tab = { kind: 'impact', path }
       const exists = get().tabs.some((t) => t.kind === 'impact' && t.path === path)
@@ -842,20 +913,101 @@ export const useStore = create<State & Actions>((setState, get) => {
       setState({ requests: { ...get().requests, [id]: { ...req, ...patch } } })
     },
 
+    activeVars() {
+      const st = get()
+      const env = st.environments.find((e) => e.id === st.activeEnvId)
+      return { ...st.apiVars, ...(env?.vars ?? {}) }
+    },
+
+    addEnvironment(name) {
+      const id = crypto.randomUUID()
+      setState({ environments: [...get().environments, { id, name, vars: {} }], activeEnvId: id })
+      return id
+    },
+
+    renameEnvironment(id, name) {
+      setState({ environments: get().environments.map((e) => (e.id === id ? { ...e, name } : e)) })
+    },
+
+    deleteEnvironment(id) {
+      setState({
+        environments: get().environments.filter((e) => e.id !== id),
+        activeEnvId: get().activeEnvId === id ? null : get().activeEnvId,
+      })
+    },
+
+    setActiveEnv(id) {
+      setState({ activeEnvId: id })
+    },
+
+    setEnvVar(id, key, value) {
+      setState({
+        environments: get().environments.map((e) => (e.id === id ? { ...e, vars: { ...e.vars, [key]: value } } : e)),
+      })
+    },
+
+    removeEnvVar(id, key) {
+      setState({
+        environments: get().environments.map((e) => {
+          if (e.id !== id) return e
+          const vars = { ...e.vars }
+          delete vars[key]
+          return { ...e, vars }
+        }),
+      })
+    },
+
+    setGlobalVar(key, value) {
+      setState({ apiVars: { ...get().apiVars, [key]: value } })
+    },
+
+    removeGlobalVar(key) {
+      const vars = { ...get().apiVars }
+      delete vars[key]
+      setState({ apiVars: vars })
+    },
+
     async sendRequest(id) {
       const req = get().requests[id]
       if (!req) return
-      const vars = get().apiVars
+      const vars = get().activeVars()
+      const { base, params: urlParams } = splitUrl(req.url)
+      const effectiveParams = req.params ?? urlParams
+      const finalUrl = interpolate(joinUrl(base, effectiveParams, req.auth), vars)
+      const headers = [
+        ...req.headers
+          .filter((h) => h.enabled && h.key.trim())
+          .map((h) => ({ key: h.key, value: interpolate(h.value, vars), enabled: true })),
+        ...authHeaders(req.auth).map((h) => ({ key: h.key, value: interpolate(h.value, vars), enabled: true })),
+      ]
+      const multipart = req.bodyType === 'multipart'
       setState({ sendingApi: id })
+      const startedAt = Date.now()
+
+      const record = (status: number, ms: number) => {
+        const entry: ApiHistoryEntry = { id: crypto.randomUUID(), method: req.method, url: finalUrl, status, ms, at: startedAt }
+        setState({ history: { ...get().history, [id]: [entry, ...(get().history[id] ?? [])].slice(0, 20) } })
+      }
+
       try {
         const res = await apiIpc.send({
           method: req.method,
-          url: interpolate(req.url, vars),
-          headers: req.headers
-            .filter((h) => h.enabled && h.key.trim())
-            .map((h) => ({ key: h.key, value: interpolate(h.value, vars), enabled: true })),
-          body: req.bodyType === 'none' ? undefined : interpolate(req.body, vars),
+          url: finalUrl,
+          headers,
+          body: req.bodyType === 'none' || multipart ? undefined : interpolate(req.body, vars),
+          form: multipart
+            ? (req.form ?? [])
+                .filter((f) => f.enabled && f.key.trim())
+                .map((f) => ({ key: f.key, value: interpolate(f.value, vars), path: f.path, enabled: true }))
+            : undefined,
         })
+        const results = runAssertions(req.assertions ?? [], {
+          status: res.status,
+          ms: res.ms,
+          headers: res.headers,
+          body: res.body,
+        })
+        record(res.status, res.ms)
         setState({
           responses: {
             ...get().responses,
@@ -869,9 +1021,13 @@ export const useStore = create<State & Actions>((setState, get) => {
               size: res.size,
             },
           },
-          status: `${req.method} ${res.status} · ${res.ms} ms`,
+          testResults: { ...get().testResults, [id]: results },
+          status: `${req.method} ${res.status} · ${res.ms} ms${
+            results.length ? ` · ${results.filter((r) => r.passed).length}/${results.length} tests` : ''
+          }`,
         })
       } catch (e) {
+        record(0, Date.now() - startedAt)
         setState({
           responses: {
             ...get().responses,
@@ -885,6 +1041,7 @@ export const useStore = create<State & Actions>((setState, get) => {
               size: 0,
             },
           },
+          testResults: { ...get().testResults, [id]: [] },
           status: `Request failed: ${String(e).slice(0, 80)}`,
         })
       } finally {

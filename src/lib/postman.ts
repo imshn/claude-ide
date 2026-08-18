@@ -8,6 +8,8 @@
  * silently — but they are preserved so nothing is lost on re-export.
  */
 
+import type { Assertion, Auth, MultipartField, QueryParam } from './apitest'
+
 export interface ApiHeader {
   key: string
   value: string
@@ -21,9 +23,15 @@ export interface ApiRequest {
   url: string
   headers: ApiHeader[]
   body: string
-  bodyType: 'none' | 'json' | 'text' | 'form'
+  bodyType: 'none' | 'json' | 'text' | 'form' | 'multipart'
   /** Present when the collection carried scripts we chose not to run. */
   notes?: string
+  auth?: Auth
+  /** Query params as a table; kept in sync with `url` at the editing seam. */
+  params?: QueryParam[]
+  assertions?: Assertion[]
+  /** multipart/form-data fields, used when bodyType is 'multipart'. */
+  form?: MultipartField[]
 }
 
 export interface ApiFolder {
@@ -197,12 +205,17 @@ export function parseCollection(json: string): Collection {
 
 /** Postman environment export — a flat list of values. */
 export function parseEnvironment(json: string): Record<string, string> {
+  return parseEnvironmentNamed(json).vars
+}
+
+/** Same as {@link parseEnvironment}, but keeps the environment's own name. */
+export function parseEnvironmentNamed(json: string): { name: string; vars: Record<string, string> } {
   const doc = JSON.parse(json)
-  const out: Record<string, string> = {}
+  const vars: Record<string, string> = {}
   for (const v of doc?.values ?? []) {
-    if (v?.key && v.enabled !== false) out[String(v.key)] = String(v.value ?? '')
+    if (v?.key && v.enabled !== false) vars[String(v.key)] = String(v.value ?? '')
   }
-  return out
+  return { name: String(doc?.name ?? 'Imported environment'), vars }
 }
 
 /** Substitute `{{var}}`, leaving unknown ones visible rather than blanking them. */

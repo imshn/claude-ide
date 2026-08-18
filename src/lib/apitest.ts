@@ -65,6 +65,14 @@ export interface QueryParam {
   enabled: boolean
 }
 
+/** A multipart/form-data field; `path` set means it's a file, not text. */
+export interface MultipartField {
+  key: string
+  value: string
+  path?: string
+  enabled: boolean
+}
+
 export function splitUrl(url: string): { base: string; params: QueryParam[] } {
   const i = url.indexOf('?')
   if (i === -1) return { base: url, params: [] }

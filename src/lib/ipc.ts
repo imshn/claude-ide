@@ -123,6 +123,7 @@ export interface ApiWire {
   followRedirects?: boolean
   timeoutSecs?: number
   insecure?: boolean
+  form?: { key: string; value: string; path?: string; enabled: boolean }[]
 }
 
 export interface ApiResponseWire {
