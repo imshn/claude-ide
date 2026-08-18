@@ -12,6 +12,9 @@ import {
   reconstruct,
   rollup,
   type Decision,
+  proposalAction,
+  groupFiles,
+  stemOf,
 } from './review'
 
 const decisions = new Map<string, Decision>()
@@ -128,6 +131,52 @@ const reset = () => decisions.clear()
   assert.equal(groupOf('db/migrations/001_init.sql'), 'Database')
   assert.equal(groupOf('src/components/Button.tsx'), 'Interface')
   assert.equal(groupOf('README.md'), 'Documentation')
+}
+
+// --- Proposal retention: the rule that makes a rejection reversible ---------
+{
+  // Nothing held yet — whatever is on disk is the proposal.
+  assert.equal(proposalAction(false, undefined, 'anything'), 'replace')
+
+  // We wrote this exact content, so the disk is our projection of the user's
+  // decisions. Keeping the held proposal is what lets a rejected line be
+  // un-rejected instead of disappearing from the list.
+  assert.equal(proposalAction(true, 'reverted', 'reverted'), 'keep')
+
+  // Claude wrote something new over the top — the old decisions are stale.
+  assert.equal(proposalAction(true, 'reverted', 'claude wrote this'), 'replace')
+
+  // We hold a proposal but never wrote anything: the user has decided nothing
+  // yet, so the disk is still Claude's version.
+  assert.equal(proposalAction(true, undefined, 'claude version'), 'replace')
+}
+
+// --- Grouping beyond top-level directories ---------------------------------
+{
+  const mk = (path: string) => buildFileChange(path, `/r/${path}`, 'M', 'a\n', 'b\n')
+
+  // Files sharing a stem group together even across unrelated directories —
+  // the case a top-level-directory heuristic gets wrong.
+  const g1 = groupFiles([mk('server/billing.go'), mk('client/billing.ts')])
+  assert.equal(g1.length, 1, `expected one group, got ${JSON.stringify(g1)}`)
+  assert.equal(g1[0].name, 'Billing')
+  assert.deepEqual(g1[0].files, ['client/billing.ts', 'server/billing.go'])
+
+  // A lone file is named for its directory, skipping generic wrappers.
+  const g2 = groupFiles([mk('src/features/checkout/flow.go')])
+  assert.equal(g2[0].name, 'Checkout')
+
+  // Keyword rules still win over both.
+  const g3 = groupFiles([mk('anywhere/auth.go'), mk('other/login.go')])
+  assert.equal(g3[0].name, 'Authentication')
+  assert.equal(g3[0].files.length, 2)
+
+  // Compound names reduce to their head, so auth.service.ts and
+  // auth.controller.ts land in the same group.
+  assert.equal(stemOf('src/auth.service.test.ts'), 'auth')
+  assert.equal(stemOf('src/index.d.ts'), 'index')
+  assert.equal(stemOf('a/b/user_test.go'), 'user')
+  assert.equal(stemOf('Makefile'), 'makefile')
 }
 
 console.log('review engine: all checks passed')

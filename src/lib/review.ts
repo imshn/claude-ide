@@ -206,15 +206,89 @@ export function groupOf(path: string): string {
   return 'Other'
 }
 
+const title = (s: string) =>
+  s.replace(/[-_]/g, ' ').replace(/^\w/, (c) => c.toUpperCase())
+
+/**
+ * The filename without extensions or test/spec suffixes.
+ * `src/auth.service.test.ts` -> `auth`
+ */
+export function stemOf(path: string): string {
+  const base = path.split('/').pop() ?? path
+  return base
+    .replace(/\.(test|spec|stories|d)\.[^.]+$/i, '')
+    .replace(/_test\.[^.]+$/i, '')
+    .replace(/\.[^.]+$/, '')
+    .toLowerCase()
+}
+
+/** The directory a file lives in, named from its last meaningful segment. */
+function dirGroup(path: string): string {
+  const parts = path.split('/')
+  parts.pop()
+  // Skip generic wrappers so `src/features/billing/x.ts` reads as "Billing".
+  while (parts.length > 1 && /^(src|app|lib|packages?|apps?)$/i.test(parts[0])) parts.shift()
+  const last = parts[parts.length - 1]
+  return last ? title(last) : 'Root'
+}
+
+/**
+ * Group changes into units a person would recognise.
+ *
+ * Three passes, because a single rule set cannot cover every layout:
+ *   1. Keyword rules — the strongest signal when a repo uses common names.
+ *   2. Stem affinity — files sharing a basename belong together even when they
+ *      live in unrelated directories, which is exactly the case a path-only
+ *      heuristic got wrong.
+ *   3. Directory, named from its last meaningful segment rather than the
+ *      top-level folder, so `src/features/billing/*` reads as "Billing".
+ */
 export function groupFiles(files: FileChange[]): Group[] {
   const map = new Map<string, string[]>()
-  for (const f of files) {
-    const name = groupOf(f.path)
+  const add = (name: string, path: string) => {
     const list = map.get(name)
-    if (list) list.push(f.path)
-    else map.set(name, [f.path])
+    if (list) list.push(path)
+    else map.set(name, [path])
   }
+
+  const unmatched: FileChange[] = []
+  for (const f of files) {
+    const rule = RULES.find(([re]) => re.test(f.path))
+    if (rule) add(rule[1], f.path)
+    else unmatched.push(f)
+  }
+
+  const byStem = new Map<string, string[]>()
+  for (const f of unmatched) {
+    const stem = stemOf(f.path)
+    byStem.set(stem, [...(byStem.get(stem) ?? []), f.path])
+  }
+
+  for (const [stem, paths] of byStem) {
+    // A shared stem is only evidence when more than one file shares it.
+    if (paths.length > 1) add(title(stem), paths[0])
+    if (paths.length > 1) for (const p of paths.slice(1)) add(title(stem), p)
+    else for (const p of paths) add(dirGroup(p), p)
+  }
+
   return [...map.entries()]
-    .map(([name, paths]) => ({ name, files: paths.sort() }))
+    .map(([name, paths]) => ({ name, files: [...new Set(paths)].sort() }))
     .sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * When a refresh sees a changed file, is the version on disk a *new* proposal
+ * from Claude, or just our own projection of the user's decisions written back?
+ *
+ * Getting this wrong is what made rejections erase themselves: treating our own
+ * write as a new proposal re-derived the diff from the reverted file, so the
+ * rejected change vanished from the list entirely.
+ */
+export function proposalAction(
+  hasExisting: boolean,
+  lastWritten: string | undefined,
+  disk: string,
+): 'keep' | 'replace' {
+  if (!hasExisting) return 'replace'
+  return lastWritten === disk ? 'keep' : 'replace'
 }

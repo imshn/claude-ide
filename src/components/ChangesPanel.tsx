@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import clsx from 'clsx'
-import { Check, ChevronDown, ChevronRight, History, RotateCcw, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, History, Redo2, RotateCcw, Undo2, X } from 'lucide-react'
 import { useStore } from '../lib/store'
 import { changedIdsInFile, rollup, type Decision, type FileChange } from '../lib/review'
 import { Button, Empty, Panel, Stat, StateMark } from './ui'
@@ -16,6 +16,10 @@ export function ChangesPanel() {
   const acceptAll = useStore((s) => s.acceptAll)
   const rejectAll = useStore((s) => s.rejectAll)
   const refreshChanges = useStore((s) => s.refreshChanges)
+  const undoDecision = useStore((s) => s.undoDecision)
+  const redoDecision = useStore((s) => s.redoDecision)
+  const canUndo = useStore((s) => s.past.length > 0)
+  const canRedo = useStore((s) => s.futureEdits.length > 0)
   const [showHistory, setShowHistory] = useState(false)
 
   const byPath = useMemo(() => new Map(files.map((f) => [f.path, f])), [files])
@@ -60,6 +64,24 @@ export function ChangesPanel() {
       title="Changes"
       actions={
         <>
+          <Button
+            compact
+            variant="ghost"
+            disabled={!canUndo}
+            onClick={() => void undoDecision()}
+            title="Undo last accept/reject (⌘Z)"
+          >
+            <Undo2 size={12} />
+          </Button>
+          <Button
+            compact
+            variant="ghost"
+            disabled={!canRedo}
+            onClick={() => void redoDecision()}
+            title="Redo (⇧⌘Z)"
+          >
+            <Redo2 size={12} />
+          </Button>
           <Button
             compact
             variant="ghost"

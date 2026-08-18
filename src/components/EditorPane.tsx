@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import Editor, { type OnMount } from '@monaco-editor/react'
 import clsx from 'clsx'
-import { FileText, Send, X } from 'lucide-react'
+import { FileText, Network, Send, X } from 'lucide-react'
 import { fs } from '../lib/ipc'
 import { useStore, type Tab } from '../lib/store'
 import { canFormat } from '../lib/format'
@@ -10,6 +10,7 @@ import { DiffReview } from './DiffReview'
 import { PlanTab } from './PlanTab'
 import { MediaViewer } from './MediaViewer'
 import { ApiRequestTab } from './ApiRequestTab'
+import { ImpactTab } from './ImpactTab'
 import { ContextMenu, type MenuState } from './ContextMenu'
 import { Empty } from './ui'
 
@@ -23,7 +24,10 @@ const LANG: Record<string, string> = {
 
 const langOf = (p: string) => LANG[p.split('.').pop()?.toLowerCase() ?? ''] ?? 'plaintext'
 const sameTab = (a: Tab, b: Tab) =>
-  a.kind === b.kind && (a.kind === 'file' ? a.path === (b as any).path : (a as any).id === (b as any).id)
+  a.kind === b.kind &&
+  (a.kind === 'file' || a.kind === 'impact'
+    ? a.path === (b as any).path
+    : (a as any).id === (b as any).id)
 
 export function EditorPane() {
   const { tabs, activeTab, contents, view, files, selected, plans, reveal, requests, root, binaryPaths } =
@@ -37,6 +41,7 @@ export function EditorPane() {
   const attachPaths = useStore((s) => s.attachPaths)
   const attachSelection = useStore((s) => s.attachSelection)
   const openAsText = useStore((s) => s.openAsText)
+  const openImpact = useStore((s) => s.openImpact)
 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null)
   const [menu, setMenu] = useState<MenuState | null>(null)
@@ -185,6 +190,15 @@ export function EditorPane() {
           run: () => path && void attachPaths([path]),
         },
         {
+          id: 'impact',
+          label: 'Analyze Impact',
+          disabled: !path || !root,
+          run: () => {
+            if (!path || !root) return
+            openImpact(path.startsWith(root + '/') ? path.slice(root.length + 1) : path)
+          },
+        },
+        {
           id: 'format',
           label: 'Format Document',
           hint: '⌥⇧F',
@@ -221,6 +235,7 @@ export function EditorPane() {
 
   const plan = activeTab?.kind === 'plan' ? plans.find((p) => p.id === activeTab.id) : null
   const apiId = activeTab?.kind === 'api' ? activeTab.id : null
+  const impactPath = activeTab?.kind === 'impact' ? activeTab.path : null
   // Extension match OR "the file could not be read as text" — so a format the
   // list does not know about still opens instead of erroring.
   const showMedia =
@@ -238,9 +253,12 @@ export function EditorPane() {
                 ? (plans.find((p) => p.id === t.id)?.title ?? 'Plan')
                 : t.kind === 'api'
                   ? (requests[t.id]?.name ?? 'Request')
-                  : t.path.split('/').pop()
+                  : t.kind === 'impact'
+                    ? `Impact: ${t.path.split('/').pop()}`
+                    : t.path.split('/').pop()
             const active = activeTab && sameTab(activeTab, t)
-            const key = t.kind === 'file' ? `file:${t.path}` : `${t.kind}:${t.id}`
+            const key =
+              t.kind === 'file' || t.kind === 'impact' ? `${t.kind}:${t.path}` : `${t.kind}:${t.id}`
             return (
               <div
                 key={key}
@@ -255,6 +273,7 @@ export function EditorPane() {
               >
                 {t.kind === 'plan' && <FileText size={11} className="shrink-0 text-accent" />}
                 {t.kind === 'api' && <Send size={11} className="shrink-0 text-add" />}
+                {t.kind === 'impact' && <Network size={11} className="shrink-0 text-pending" />}
                 <button onClick={() => setActiveTab(t)} className="max-w-[180px] truncate">
                   {label}
                 </button>
@@ -275,6 +294,8 @@ export function EditorPane() {
         <PlanTab key={plan.id} plan={plan} />
       ) : apiId ? (
         <ApiRequestTab key={apiId} id={apiId} />
+      ) : impactPath ? (
+        <ImpactTab key={impactPath} path={impactPath} />
       ) : showMedia && activePath ? (
         <MediaViewer
           key={activePath}

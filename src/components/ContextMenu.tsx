@@ -36,15 +36,22 @@ export function ContextMenu({ state, onClose }: { state: MenuState | null; onClo
 
   useEffect(() => {
     if (!state) return
-    const close = () => onClose()
+    // Must test the target here rather than rely on stopPropagation inside the
+    // menu: this listener runs in the capture phase, so React's bubble-phase
+    // handler cannot cancel it. Closing unconditionally unmounted the menu
+    // before the click landed, which made every item silently do nothing.
+    const close = (e: MouseEvent) => {
+      if (e.target instanceof Node && ref.current?.contains(e.target)) return
+      onClose()
+    }
     const key = (e: KeyboardEvent) => e.key === 'Escape' && onClose()
-    // `capture` so a click anywhere dismisses before it activates something else.
+    const dismiss = () => onClose()
     window.addEventListener('mousedown', close, true)
-    window.addEventListener('resize', close)
+    window.addEventListener('resize', dismiss)
     window.addEventListener('keydown', key)
     return () => {
       window.removeEventListener('mousedown', close, true)
-      window.removeEventListener('resize', close)
+      window.removeEventListener('resize', dismiss)
       window.removeEventListener('keydown', key)
     }
   }, [state, onClose])

@@ -141,6 +141,43 @@ export const api = {
   readJson: (path: string) => invoke<string>('read_json_file', { path }),
 }
 
+export interface SymbolDef {
+  name: string
+  kind: string
+  path: string
+  line: number
+  exported: boolean
+}
+export interface SymbolRef {
+  name: string
+  path: string
+  line: number
+  text: string
+}
+export interface ImpactReport {
+  path: string
+  definitions: SymbolDef[]
+  importers: SymbolRef[]
+  callers: SymbolRef[]
+  tests: string[]
+  files_affected: number
+  scanned: number
+  truncated: boolean
+}
+
+export const impact = {
+  analyze: (root: string, path: string) => invoke<ImpactReport>('analyze_impact', { root, path }),
+  symbols: (root: string, query: string) => invoke<SymbolDef[]>('symbol_index', { root, query }),
+}
+
+export const watch = {
+  start: (root: string) => invoke<void>('watch_start', { root }),
+  stop: () => invoke<void>('watch_stop'),
+}
+
+export const onFsChanged = (cb: (paths: string[]) => void) =>
+  listen<string[]>('fs-changed', (e) => cb(e.payload))
+
 export const approval = {
   setup: () => invoke<string>('approval_setup'),
   respond: (id: string, allow: boolean, reason: string) =>

@@ -213,9 +213,19 @@ pre-request and test scripts are **preserved but never executed** — running
 arbitrary JavaScript out of a downloaded file is not something an IDE should do
 quietly — and any request carrying one says so.
 
-**Search** is literal / regex / symbol / filename over `git ls-files`, plus an
-"Ask Claude instead" button for questions like *"where do we validate JWTs?"*.
-There is no embedding index and the UI does not pretend otherwise.
+**Search** is literal / regex / filename over `git ls-files`, plus a **symbol
+index** that returns declarations rather than every line containing a word, and
+an "Ask Claude instead" button for natural-language questions. There is no
+embedding index and the UI does not pretend otherwise.
+
+**Impact analysis** answers "what breaks if I change this?" from that index
+rather than by asking the model to re-read the repo: definitions, importers,
+possible callers, and which tests touch the file. It is lexical, not type-aware —
+two unrelated classes with a `run` method look like one symbol — so callers are
+labelled *possible* and the count is a ceiling, not a certainty.
+
+**A filesystem watcher** keeps the review current when the tree changes from
+outside the app — a terminal command, another editor, a `git checkout`.
 
 **Terminal** runs your real login shell (`zsh -l -i`) via a generated `ZDOTDIR`
 that sources your own `~/.zshrc` untouched, then layers on completion. The

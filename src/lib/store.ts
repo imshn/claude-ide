@@ -3,6 +3,7 @@ import {
   buildFileChange,
   changedIdsInFile,
   groupFiles,
+  proposalAction,
   reconstruct,
   type Decision,
   type FileChange,
@@ -20,6 +21,7 @@ import {
   media,
   relative,
   skills as skillsIpc,
+  watch,
   type Detection,
   type RepoStatus,
   type Skill,
@@ -62,6 +64,7 @@ export type Tab =
   | { kind: 'file'; path: string }
   | { kind: 'plan'; id: string }
   | { kind: 'api'; id: string }
+  | { kind: 'impact'; path: string }
 
 export interface Attachment {
   id: string
@@ -116,6 +119,16 @@ interface State {
 
   baseTree: string | null
   checkpoints: Checkpoint[]
+  /**
+   * What Claude proposed this review round, captured once and held.
+   * The diff is derived from this rather than from disk — deriving it from disk
+   * meant a rejection erased itself from the next refresh, because rejecting
+   * writes the baseline back and the file then looks unchanged.
+   */
+  proposals: Record<string, Proposal>
+  /** Decision undo/redo, so a reject is reversible without a checkpoint. */
+  past: DecisionEdit[]
+  futureEdits: DecisionEdit[]
   files: FileChange[]
   groups: Group[]
   decisions: Map<string, Decision>
@@ -143,6 +156,19 @@ interface State {
   looseRequests: string[]
   apiVars: Record<string, string>
   sendingApi: string | null
+}
+
+export interface Proposal {
+  baseline: string
+  proposed: string
+  status: FileStatus
+  absPath: string
+}
+
+export interface DecisionEdit {
+  ids: string[]
+  /** Previous value per id; undefined means it had no decision. */
+  prev: [string, Decision | undefined][]
 }
 
 export interface CodeSelection {
@@ -204,6 +230,8 @@ interface Actions {
   snapshot: (label: string) => Promise<string | null>
   refreshChanges: () => Promise<void>
   decide: (ids: string[], d: Decision) => Promise<void>
+  undoDecision: () => Promise<void>
+  redoDecision: () => Promise<void>
   acceptAll: () => Promise<void>
   rejectAll: () => Promise<void>
   restore: (tree: string) => Promise<void>
@@ -219,11 +247,13 @@ interface Actions {
   removeAttachment: (id: string) => void
   loadSkills: () => Promise<void>
   loadFileIndex: () => Promise<void>
+  onDiskChanged: (paths: string[]) => Promise<void>
   formatActive: () => Promise<void>
 
   importCollection: () => Promise<void>
   newRequest: () => void
   openRequest: (id: string) => void
+  openImpact: (path: string) => void
   updateRequest: (id: string, patch: Partial<ApiRequest>) => void
   sendRequest: (id: string) => Promise<void>
 
@@ -342,6 +372,58 @@ export const useStore = create<State & Actions>((setState, get) => {
     }
   }
 
+  /**
+   * Write every touched file to what the current decisions imply.
+   * Disk is a projection of the decision map, never the source of truth — that
+   * inversion is what makes a rejection reversible.
+   */
+  async function project(decisions: Map<string, Decision>): Promise<string[]> {
+    const written = { ...get().written }
+    const contents = { ...get().contents }
+    const failures: string[] = []
+
+    for (const file of get().files) {
+      const next = reconstruct(file, decisions)
+      if (written[file.path] === next) continue
+      try {
+        if (next === '' && file.status === 'A') await fs.remove(file.absPath)
+        else await fs.write(file.absPath, next)
+        written[file.path] = next
+        if (file.absPath in contents) contents[file.absPath] = next
+      } catch (e) {
+        failures.push(`${file.path}: ${e}`)
+      }
+    }
+    setState({ written, contents })
+    void get().refreshRepo()
+    return failures
+  }
+
+  async function applyDecisions(ids: string[], d: Decision) {
+    const decisions = new Map(get().decisions)
+    for (const id of ids) decisions.set(id, d)
+
+    const failures = await project(decisions)
+    if (failures.length) {
+      // Recording a decision whose write failed would claim a revert that never
+      // happened, so drop those files' decisions and say so.
+      for (const f of failures) {
+        const path = f.split(':')[0]
+        for (const id of ids) if (id.startsWith(`${path}#`)) decisions.delete(id)
+      }
+      setState({ decisions, status: `Could not write ${failures[0]}` })
+      say({ kind: 'notice', tone: 'error', text: `Could not apply your review:\n${failures.join('\n')}` })
+      return
+    }
+
+    setState({ decisions })
+    const total = get().files.flatMap(changedIdsInFile)
+    const left = total.filter((id) => !decisions.has(id)).length
+    setState({
+      status: left ? `${left} change${left === 1 ? '' : 's'} left to review` : 'Every change reviewed',
+    })
+  }
+
   /** Honour the repo's own prettier settings rather than imposing ours. */
   async function loadPrettierConfig(root: string) {
     for (const [file, fromPkg] of [
@@ -410,6 +492,9 @@ export const useStore = create<State & Actions>((setState, get) => {
     codeSelection: null,
     baseTree: null,
     checkpoints: [],
+    proposals: {},
+    past: [],
+    futureEdits: [],
     files: [],
     groups: [],
     decisions: new Map(),
@@ -512,6 +597,33 @@ export const useStore = create<State & Actions>((setState, get) => {
       }
     },
 
+    /**
+     * Something changed on disk outside the app. Re-derive the review state and
+     * reload open files — except the one being edited, whose in-memory edits we
+     * would otherwise silently discard.
+     */
+    async onDiskChanged(paths) {
+      const { root, activeTab } = get()
+      if (!root) return
+      const active = activeTab?.kind === 'file' ? activeTab.path : null
+
+      const contents = { ...get().contents }
+      let reloaded = 0
+      for (const abs of paths) {
+        if (!(abs in contents) || abs === active) continue
+        const next = await fs.read(abs).catch(() => null)
+        if (next !== null && next !== contents[abs]) {
+          contents[abs] = next
+          reloaded++
+        }
+      }
+      if (reloaded) setState({ contents })
+
+      await get().refreshRepo()
+      await get().refreshChanges()
+      void get().loadFileIndex()
+    },
+
     async loadFileIndex() {
       const root = get().root
       if (!root) return
@@ -580,6 +692,12 @@ export const useStore = create<State & Actions>((setState, get) => {
         looseRequests: [...get().looseRequests, req.id],
       })
       get().openRequest(req.id)
+    },
+
+    openImpact(path) {
+      const tab: Tab = { kind: 'impact', path }
+      const exists = get().tabs.some((t) => t.kind === 'impact' && t.path === path)
+      setState({ tabs: exists ? get().tabs : [...get().tabs, tab], activeTab: tab })
     },
 
     openRequest(id) {
@@ -677,6 +795,9 @@ export const useStore = create<State & Actions>((setState, get) => {
         decisions: new Map(),
         written: {},
         checkpoints: [],
+        proposals: {},
+        past: [],
+        futureEdits: [],
         usage: emptyUsage(),
         running: false,
         busy: false,
@@ -689,6 +810,7 @@ export const useStore = create<State & Actions>((setState, get) => {
       void get().loadSkills()
       void get().loadFileIndex()
       void loadPrettierConfig(root)
+      void watch.start(root).catch(() => setState({ status: 'File watching unavailable' }))
       const tree = await get().snapshot('Opened workspace')
       setState({ baseTree: tree })
     },
@@ -846,6 +968,17 @@ export const useStore = create<State & Actions>((setState, get) => {
 
         case 'result': {
           const ok = ev.subtype === 'success'
+
+          // Claude sometimes plans by delegating to a subagent and never emits a
+          // plan tool call or file, which used to mean no approval gate opened
+          // at all. Fall back to the turn's final prose, which *is* the plan.
+          if (get().planMode && !get().plans.some((p) => !p.approved) && ok) {
+            const lastText = [...get().chat].reverse().find((c) => c.kind === 'assistant')?.text
+            if (lastText && lastText.trim().length > 120) {
+              void capturePlan({ inline: lastText })
+            }
+          }
+
           setState({
             busy: false,
             streaming: '',
@@ -972,7 +1105,9 @@ export const useStore = create<State & Actions>((setState, get) => {
     closeTab(t) {
       const same = (a: Tab, b: Tab) =>
         a.kind === b.kind &&
-        (a.kind === 'file' ? a.path === (b as any).path : a.id === (b as any).id)
+        (a.kind === 'file' || a.kind === 'impact'
+          ? a.path === (b as any).path
+          : a.id === (b as any).id)
       const tabs = get().tabs.filter((x) => !same(x, t))
       const active = get().activeTab && same(get().activeTab!, t)
         ? (tabs[tabs.length - 1] ?? null)
@@ -1019,16 +1154,42 @@ export const useStore = create<State & Actions>((setState, get) => {
 
       try {
         const changed = await checkpoint.changes(root, baseTree)
-        const files: FileChange[] = []
+        const proposals = { ...get().proposals }
+        const written = get().written
+        let decisions = new Map(get().decisions)
+
         for (const c of changed) {
           const abs = `${root}/${c.path}`
-          const baseline = await checkpoint.fileAt(root, baseTree, c.path)
-          const current = c.status === 'D' ? '' : await fs.read(abs).catch(() => '')
-          const status = (c.status === 'A' ? 'A' : c.status === 'D' ? 'D' : 'M') as FileStatus
-          files.push(buildFileChange(c.path, abs, status, baseline, current))
+          const disk = c.status === 'D' ? '' : await fs.read(abs).catch(() => '')
+          const existing = proposals[c.path]
+
+          // If the disk matches what we last wrote, this is our own projection of
+          // the user's decisions — keep the proposal we already hold. Otherwise
+          // Claude has written something new, so it becomes the proposal and any
+          // decisions about the old one no longer mean anything.
+          if (proposalAction(!!existing, written[c.path], disk) === 'keep') continue
+
+          if (existing) {
+            for (const id of changedIdsInFile(buildFileChange(c.path, abs, existing.status, existing.baseline, existing.proposed))) {
+              decisions.delete(id)
+            }
+          }
+          proposals[c.path] = {
+            baseline: await checkpoint.fileAt(root, baseTree, c.path),
+            proposed: disk,
+            status: (c.status === 'A' ? 'A' : c.status === 'D' ? 'D' : 'M') as FileStatus,
+            absPath: abs,
+          }
         }
-        files.sort((a, b) => a.path.localeCompare(b.path))
+
+        const files = Object.entries(proposals)
+          .map(([path, p]) => buildFileChange(path, p.absPath, p.status, p.baseline, p.proposed))
+          .filter((f) => f.hunks.length > 0)
+          .sort((a, b) => a.path.localeCompare(b.path))
+
         setState({
+          proposals,
+          decisions,
           files,
           groups: groupFiles(files),
           selected:
@@ -1046,48 +1207,50 @@ export const useStore = create<State & Actions>((setState, get) => {
     },
 
     async decide(ids, d) {
+      const prev: [string, Decision | undefined][] = ids.map((id) => [id, get().decisions.get(id)])
+      await applyDecisions(ids, d)
+      // One entry per user action, so undo steps back the way they clicked.
+      setState({ past: [...get().past, { ids, prev }].slice(-100), futureEdits: [] })
+    },
+
+    async undoDecision() {
+      const past = [...get().past]
+      const edit = past.pop()
+      if (!edit) return setState({ status: 'Nothing to undo' })
+
+      const redo: [string, Decision | undefined][] = edit.ids.map((id) => [id, get().decisions.get(id)])
       const decisions = new Map(get().decisions)
-      for (const id of ids) decisions.set(id, d)
-
-      const touched = new Set(ids.map((id) => id.split('#')[0]))
-      const written = { ...get().written }
-      const contents = { ...get().contents }
-      const failures: string[] = []
-
-      for (const file of get().files) {
-        if (!touched.has(file.path)) continue
-        const next = reconstruct(file, decisions)
-        if (written[file.path] === next) continue
-        try {
-          if (next === '' && file.status === 'A') await fs.remove(file.absPath)
-          else await fs.write(file.absPath, next)
-          written[file.path] = next
-          if (file.absPath in contents) contents[file.absPath] = next
-        } catch (e) {
-          // A swallowed write error is indistinguishable from a dead button, and
-          // recording the decision anyway would claim a revert that never
-          // happened. Roll this file's decisions back and say so.
-          failures.push(`${file.path}: ${e}`)
-          for (const id of ids) if (id.startsWith(`${file.path}#`)) decisions.delete(id)
-        }
+      for (const [id, value] of edit.prev) {
+        if (value === undefined) decisions.delete(id)
+        else decisions.set(id, value)
       }
+      await project(decisions)
+      setState({
+        decisions,
+        past,
+        futureEdits: [...get().futureEdits, { ids: edit.ids, prev: redo }],
+        status: 'Undid last review decision',
+      })
+    },
 
-      setState({ decisions, written, contents })
+    async redoDecision() {
+      const future = [...get().futureEdits]
+      const edit = future.pop()
+      if (!edit) return setState({ status: 'Nothing to redo' })
 
-      if (failures.length) {
-        setState({ status: `Could not write ${failures[0]}` })
-        say({ kind: 'notice', tone: 'error', text: `Could not apply your review:\n${failures.join('\n')}` })
-      } else {
-        const total = get().files.flatMap(changedIdsInFile)
-        const settled = total.filter((id) => get().decisions.has(id)).length
-        setState({
-          status:
-            settled === total.length
-              ? 'Every change reviewed'
-              : `${total.length - settled} change${total.length - settled === 1 ? '' : 's'} left to review`,
-        })
+      const undo: [string, Decision | undefined][] = edit.ids.map((id) => [id, get().decisions.get(id)])
+      const decisions = new Map(get().decisions)
+      for (const [id, value] of edit.prev) {
+        if (value === undefined) decisions.delete(id)
+        else decisions.set(id, value)
       }
-      void get().refreshRepo()
+      await project(decisions)
+      setState({
+        decisions,
+        futureEdits: future,
+        past: [...get().past, { ids: edit.ids, prev: undo }],
+        status: 'Redid review decision',
+      })
     },
 
     async acceptAll() {

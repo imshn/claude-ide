@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { open as openDialog } from '@tauri-apps/plugin-dialog'
 import clsx from 'clsx'
 import { Check, Files, GitBranch, GitCompare, Search, Send, Settings, X } from 'lucide-react'
-import { onApproval, onClaude } from './lib/ipc'
+import { onApproval, onClaude, onFsChanged } from './lib/ipc'
 import { GIT_ASK_LABELS, useStore, type View } from './lib/store'
 import { ApiPanel } from './components/ApiPanel'
 import { DEFAULT_POLICY, EFFORTS, MODELS, type Policy } from './lib/session'
@@ -40,9 +40,12 @@ export default function App() {
     })
     // A blocked tool call is waiting on this — the CLI is paused until we answer.
     const offApproval = onApproval((r) => useStore.getState().onApproval(r))
+    // Debounced in Rust; this just re-derives state from what landed.
+    const offFs = onFsChanged((paths) => void useStore.getState().onDiskChanged(paths))
     return () => {
       void offClaude.then((f) => f())
       void offApproval.then((f) => f())
+      void offFs.then((f) => f())
     }
   }, [])
 
@@ -73,6 +76,8 @@ export default function App() {
       { id: 'checkpoint', label: 'Create checkpoint', hint: 'restore point', run: () => void store.snapshot('Manual checkpoint') },
       { id: 'accept', label: 'Accept all changes', run: () => void store.acceptAll() },
       { id: 'reject', label: 'Reject all changes', hint: 'revert to checkpoint', run: () => void store.rejectAll() },
+      { id: 'undo-review', label: 'Undo review decision', keys: '⌘Z', run: () => void store.undoDecision() },
+      { id: 'redo-review', label: 'Redo review decision', keys: '⇧⌘Z', run: () => void store.redoDecision() },
       ...GIT_ASK_LABELS.map((a) => ({
         id: `git-${a.id}`,
         label: a.label,
@@ -104,6 +109,12 @@ export default function App() {
       if (e.key === 'Escape') return s.set('paletteOpen', false)
       if (!(e.metaKey || e.ctrlKey)) return
       const hit = (k: string) => e.key.toLowerCase() === k
+      // Only while reviewing — the editor keeps its own undo everywhere else.
+      if (hit('z') && s.view === 'changes') {
+        e.preventDefault()
+        void (e.shiftKey ? s.redoDecision() : s.undoDecision())
+        return
+      }
       if (hit('f') && e.shiftKey) { e.preventDefault(); s.set('view', 'search') }
       else if (hit('k')) { e.preventDefault(); s.set('paletteOpen', !s.paletteOpen) }
       else if (hit('j')) { e.preventDefault(); s.set('terminalOpen', !s.terminalOpen) }

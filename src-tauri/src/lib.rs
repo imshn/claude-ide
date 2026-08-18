@@ -3,12 +3,14 @@ mod claude;
 mod fsops;
 mod git;
 mod http;
+mod impact;
 mod intel;
 mod media;
 mod pty;
 mod search;
 mod shellenv;
 mod skills;
+mod watcher;
 
 pub fn run() {
     tauri::Builder::default()
@@ -16,6 +18,7 @@ pub fn run() {
         .manage(claude::Sessions::default())
         .manage(pty::Terminals::default())
         .manage(approval::Approvals::default())
+        .manage(watcher::Watchers::default())
         .invoke_handler(tauri::generate_handler![
             fsops::list_dir,
             fsops::read_file,
@@ -44,6 +47,11 @@ pub fn run() {
             skills::list_skills,
             http::api_send,
             http::read_json_file,
+            impact::analyze_impact,
+            impact::symbol_index,
+            impact::symbol_summary,
+            watcher::watch_start,
+            watcher::watch_stop,
             approval::approval_setup,
             approval::approval_respond,
             approval::approval_stats,

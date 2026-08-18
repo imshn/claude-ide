@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { CaseSensitive, Loader2, Search, Sparkles } from 'lucide-react'
-import { search, type SearchResults } from '../lib/ipc'
+import { impact, search, type SearchResults, type SymbolDef } from '../lib/ipc'
 import { useStore } from '../lib/store'
 import { Button, Empty, Panel } from './ui'
 
@@ -10,7 +10,7 @@ type Mode = 'text' | 'regex' | 'symbol' | 'file'
 const MODES: { id: Mode; label: string; hint: string }[] = [
   { id: 'text', label: 'Text', hint: 'literal match' },
   { id: 'regex', label: 'Regex', hint: 'regular expression' },
-  { id: 'symbol', label: 'Symbol', hint: 'definitions of a name' },
+  { id: 'symbol', label: 'Symbol', hint: 'indexed definitions' },
   { id: 'file', label: 'Files', hint: 'match file paths' },
 ]
 
@@ -25,20 +25,34 @@ export function SearchPanel() {
   const [mode, setMode] = useState<Mode>('text')
   const [caseSensitive, setCaseSensitive] = useState(false)
   const [results, setResults] = useState<SearchResults | null>(null)
+  const [symbols, setSymbols] = useState<SymbolDef[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const timer = useRef<number>()
 
   const run = useCallback(
     async (q: string, m: Mode, cs: boolean) => {
-      if (!root || !q.trim()) return setResults(null)
+      if (!root || !q.trim()) {
+        setResults(null)
+        setSymbols(null)
+        return
+      }
       setBusy(true)
       setError('')
       try {
-        setResults(await search.run(root, q, m, cs))
+        // Symbol mode reads the definition index, so it returns declarations
+        // rather than every line that happens to contain the word.
+        if (m === 'symbol') {
+          setSymbols(await impact.symbols(root, q))
+          setResults(null)
+        } else {
+          setResults(await search.run(root, q, m, cs))
+          setSymbols(null)
+        }
       } catch (e) {
         setError(String(e))
         setResults(null)
+        setSymbols(null)
       } finally {
         setBusy(false)
       }
@@ -137,7 +151,33 @@ export function SearchPanel() {
         <div className="min-h-0 flex-1 overflow-y-auto">
           {error && <p className="p-3 text-[11px] text-del">{error}</p>}
 
-          {!error && results && (
+          {!error && mode === 'symbol' && symbols && (
+            <p className="tnum px-3 py-1.5 text-[10.5px] text-fg-dim">
+              {symbols.length} definition{symbols.length === 1 ? '' : 's'}
+            </p>
+          )}
+
+          {mode === 'symbol' &&
+            symbols?.map((d, i) => (
+              <button
+                key={`${d.path}:${d.line}:${i}`}
+                onClick={() => void jump(d.path, d.line)}
+                className="anim block w-full border-b border-border-soft px-3 py-1.5 text-left hover:bg-elevated"
+              >
+                <span className="flex items-baseline gap-1.5">
+                  <span className="w-14 shrink-0 text-[10px] text-fg-dim">{d.kind}</span>
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-fg">{d.name}</span>
+                  {d.exported && <span className="shrink-0 text-[9.5px] text-add">exported</span>}
+                </span>
+                <span className="mt-0.5 flex items-baseline gap-1.5">
+                  <span className="w-14 shrink-0" />
+                  <span className="min-w-0 flex-1 truncate font-mono text-[10.5px] text-fg-dim">{d.path}</span>
+                  <span className="tnum shrink-0 text-[10px] text-fg-dim">{d.line}</span>
+                </span>
+              </button>
+            ))}
+
+          {!error && mode !== 'symbol' && results && (
             <p className="tnum px-3 py-1.5 text-[10.5px] text-fg-dim">
               {mode === 'file'
                 ? `${files.length} file${files.length === 1 ? '' : 's'}`
@@ -173,7 +213,9 @@ export function SearchPanel() {
               </button>
             ))}
 
-          {results && !hits.length && !files.length && !busy && (
+          {((mode !== 'symbol' && results && !hits.length && !files.length) ||
+            (mode === 'symbol' && symbols && !symbols.length)) &&
+            !busy && (
             <Empty title="No matches" hint="Try another mode, or ask Claude." />
           )}
         </div>
