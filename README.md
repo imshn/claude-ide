@@ -54,14 +54,14 @@ npx esbuild src/lib/review.selfcheck.ts --bundle --platform=node --format=cjs --
 
 ## Releasing
 
-**GitHub Actions cannot build this repo as-is.** macOS runners are not available
-to free accounts on *private* repositories, so the tagged workflow fails at
-startup with no job ever allocated. Three ways forward:
+**GitHub Actions is currently blocked on this account.** The tagged workflow is
+allocated and then fails in a few seconds with:
 
-- Build locally and attach the artifact (below) — no CI needed.
-- Add a spending limit / paid plan for macOS minutes, then the workflow works
-  unchanged.
-- Make the repo public, where macOS runners are free.
+> The job was not started because your account is locked due to a billing issue.
+
+That is account-level and applies even to public repositories. Clear it in
+GitHub billing settings and the workflow runs unchanged; until then, build
+locally and attach the artifact.
 
 Local release, which is how v0.1.0 was cut:
 
