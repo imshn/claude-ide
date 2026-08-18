@@ -199,6 +199,21 @@ changing either respawns the CLI with `--resume` so the thread survives.
 completes your installed skills and invokes them — verified working in headless
 mode. Only `user-invocable` skills are offered.
 
+**Multiple cursors and VS Code keybindings.** ⌘D adds the next match, ⌘⇧L selects
+every occurrence, ⌘⌥↑/↓ stack cursors, ⌥click drops one anywhere and ⌥⇧drag makes
+a column selection — Monaco's own implementations, the same ones VS Code uses,
+with a live cursor count in the status bar. ⌘P opens Go to File, ⌘⇧P the command
+palette, and **⌘K ⌘S** the full shortcut reference.
+
+The bindings live in one table (`src/lib/keys.ts`) that both the handler and the
+reference read, so the help cannot advertise a key that does nothing. A check
+enforces that we never shadow a Monaco binding, and that two of our own handlers
+never claim the same combo.
+
+One thing worth knowing: while the caret is in the editor, Monaco owns ⌘K as a
+chord prefix and it never reaches the app handler. ⌘K ⌘S is therefore registered
+with Monaco directly rather than quietly not working there.
+
 **⌘L** sends the selected lines to chat with their file and line range attached,
 so "why is this wrong?" needs no further explanation. With no selection it takes
 the caret's line. Claude's replies render as markdown rather than raw asterisks.

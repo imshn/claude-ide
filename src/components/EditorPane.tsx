@@ -30,7 +30,7 @@ const sameTab = (a: Tab, b: Tab) =>
     : (a as any).id === (b as any).id)
 
 export function EditorPane() {
-  const { tabs, activeTab, contents, view, files, selected, plans, reveal, requests, root, binaryPaths } =
+  const { tabs, activeTab, contents, view, files, selected, plans, reveal, requests, root, binaryPaths, focusEditor } =
     useStore()
   const setActiveTab = useStore((s) => s.setActiveTab)
   const closeTab = useStore((s) => s.closeTab)
@@ -59,9 +59,30 @@ export function EditorPane() {
     setReveal(null)
   }, [reveal, activePath, setReveal])
 
+  useEffect(() => {
+    if (focusEditor && editorRef.current) editorRef.current.focus()
+  }, [focusEditor])
+
   const onMount: OnMount = (editor, monaco) => {
     editorRef.current = editor
     monaco.editor.setTheme('claude-dark')
+
+    // Surface how many cursors are live — with multi-cursor editing it is
+    // otherwise easy to type into selections you forgot were there.
+    const report = () => {
+      const sels = editor.getSelections() ?? []
+      const chars = sels.reduce(
+        (n, s) => n + (editor.getModel()?.getValueInRange(s).length ?? 0),
+        0,
+      )
+      useStore.getState().set('cursors', { count: sels.length, chars })
+    }
+    // Also focus here: the effect above runs before Monaco has mounted for a
+    // freshly opened file, so its ref is still null at that point.
+    editor.focus()
+    editor.onDidChangeCursorSelection(report)
+    editor.onDidBlurEditorText(() => useStore.getState().set('cursors', { count: 0, chars: 0 }))
+    report()
 
     // Monaco's TypeScript worker gives real completions, hovers and signature
     // help. Left at defaults it reports phantom errors for anything it cannot
@@ -109,6 +130,17 @@ export function EditorPane() {
         text,
       })
     })
+    // Monaco claims ⌘K as a chord prefix while it has focus, so the app-level
+    // handler never sees it. Register the same chords here instead of losing
+    // them whenever the caret is in the editor.
+    editor.addCommand(
+      monaco.KeyMod.chord(
+        monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK,
+        monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
+      ),
+      () => useStore.getState().set('shortcutsOpen', true),
+    )
+
     // ⌥⇧F, the shortcut muscle memory already knows.
     editor.addCommand(
       monaco.KeyMod.Alt | monaco.KeyMod.Shift | monaco.KeyCode.KeyF,
@@ -324,6 +356,18 @@ export function EditorPane() {
             padding: { top: 10 },
             guides: { indentation: true },
             scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
+            // VS Code parity for multiple cursors: ⌥click adds one, ⌥⇧drag makes a
+            // column selection, and pasting N lines into N cursors spreads them.
+            multiCursorModifier: 'alt',
+            multiCursorPaste: 'spread',
+            multiCursorMergeOverlapping: true,
+            occurrencesHighlight: 'singleFile',
+            selectionHighlight: true,
+            columnSelection: false,
+            find: { seedSearchStringFromSelection: 'selection', autoFindInSelection: 'multiline' },
+            linkedEditing: true,
+            stickyScroll: { enabled: true },
+            renderWhitespace: 'selection',
             quickSuggestions: { other: true, comments: false, strings: true },
             suggestOnTriggerCharacters: true,
             acceptSuggestionOnEnter: 'on',

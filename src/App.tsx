@@ -15,6 +15,9 @@ import { EditorPane } from './components/EditorPane'
 import { ChatPanel } from './components/ChatPanel'
 import { TerminalPanel } from './components/TerminalPanel'
 import { CommandPalette, type Command } from './components/CommandPalette'
+import { QuickOpen } from './components/QuickOpen'
+import { ShortcutsDialog } from './components/ShortcutsDialog'
+import { comboOf, findBinding, prettyKeys } from './lib/keys'
 import { Button } from './components/ui'
 
 const VIEWS: { id: View; icon: typeof Files; label: string }[] = [
@@ -28,6 +31,7 @@ const VIEWS: { id: View; icon: typeof Files; label: string }[] = [
 export default function App() {
   const store = useStore()
   const [settingsOpen, setSettingsOpen] = useState(false)
+
 
   useEffect(() => {
     const offClaude = onClaude((e) => {
@@ -98,6 +102,8 @@ export default function App() {
       })),
       { id: 'stop', label: 'Stop Claude', run: () => void store.stop() },
       { id: 'settings', label: 'Settings', keys: '⌘,', run: () => setSettingsOpen(true) },
+      { id: 'shortcuts', label: 'Keyboard shortcuts', keys: prettyKeys('mod+k mod+s'), run: () => store.set('shortcutsOpen', true) },
+      { id: 'goto-file', label: 'Go to file…', keys: '⌘P', run: () => store.set('quickOpenOpen', true) },
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store.terminalOpen],
@@ -106,25 +112,79 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const s = useStore.getState()
-      if (e.key === 'Escape') return s.set('paletteOpen', false)
-      if (!(e.metaKey || e.ctrlKey)) return
-      const hit = (k: string) => e.key.toLowerCase() === k
-      // Only while reviewing — the editor keeps its own undo everywhere else.
-      if (hit('z') && s.view === 'changes') {
-        e.preventDefault()
-        void (e.shiftKey ? s.redoDecision() : s.undoDecision())
+      if (e.key === 'Escape') {
+        s.set('paletteOpen', false)
+        s.set('quickOpenOpen', false)
+        s.set('shortcutsOpen', false)
         return
       }
-      if (hit('f') && e.shiftKey) { e.preventDefault(); s.set('view', 'search') }
-      else if (hit('k')) { e.preventDefault(); s.set('paletteOpen', !s.paletteOpen) }
-      else if (hit('j')) { e.preventDefault(); s.set('terminalOpen', !s.terminalOpen) }
-      else if (hit('o')) { e.preventDefault(); void pickFolder() }
-      else if (hit(',')) { e.preventDefault(); setSettingsOpen(true) }
-      else if (hit('1')) { e.preventDefault(); s.set('view', 'explorer') }
-      else if (hit('2')) { e.preventDefault(); s.set('view', 'changes') }
-      else if (hit('3')) { e.preventDefault(); s.set('view', 'git') }
-      else if (hit('4')) { e.preventDefault(); s.set('view', 'api') }
+
+      const combo = comboOf(e)
+
+      // ⌘K opens the palette immediately; pressing ⌘S while it is open completes
+      // VS Code's ⌘K ⌘S chord. Waiting for the second key instead would put a
+      // visible delay on the palette, which is the far more common action.
+      if (combo === 'mod+s' && s.paletteOpen) {
+        e.preventDefault()
+        s.set('paletteOpen', false)
+        s.set('shortcutsOpen', true)
+        return
+      }
+
+      const binding = findBinding(combo, s.view === 'changes' ? 'changes' : 'always')
+      if (!binding) return
+
+      const run: Record<string, () => void> = {
+        'quick-open': () => s.set('quickOpenOpen', true),
+        palette: () => s.set('paletteOpen', !s.paletteOpen),
+        'palette-alt': () => s.set('paletteOpen', !s.paletteOpen),
+        explorer: () => s.set('view', 'explorer'),
+        'search-view': () => s.set('view', 'search'),
+        'git-view': () => s.set('view', 'git'),
+        'changes-view': () => s.set('view', 'changes'),
+        'view-1': () => s.set('view', 'explorer'),
+        'view-2': () => s.set('view', 'changes'),
+        'view-3': () => s.set('view', 'git'),
+        'view-4': () => s.set('view', 'api'),
+        'next-tab': () => cycleTab(1),
+        'prev-tab': () => cycleTab(-1),
+        'close-tab': () => s.activeTab && s.closeTab(s.activeTab),
+        'toggle-sidebar': () => s.set('sidebarOpen', !s.sidebarOpen),
+        terminal: () => s.set('terminalOpen', !s.terminalOpen),
+        'terminal-alt': () => s.set('terminalOpen', !s.terminalOpen),
+        'open-folder': () => void pickFolder(),
+        settings: () => setSettingsOpen(true),
+        shortcuts: () => s.set('shortcutsOpen', true),
+        'focus-chat': () =>
+          document.querySelector<HTMLTextAreaElement>('textarea[placeholder*="@ for files"]')?.focus(),
+        stop: () => void s.stop(),
+        'undo-review': () => void s.undoDecision(),
+        'redo-review': () => void s.redoDecision(),
+        'accept-all': () => void s.acceptAll(),
+        'refresh-changes': () => void s.refreshChanges(),
+        format: () => void s.formatActive(),
+        'send-selection': () => {},
+      }
+
+      const action = run[binding.id]
+      if (!action) return
+      e.preventDefault()
+      action()
     }
+
+    const cycleTab = (delta: number) => {
+      const s = useStore.getState()
+      if (!s.tabs.length) return
+      const same = (a: typeof s.tabs[0], b: typeof s.tabs[0]) =>
+        a.kind === b.kind &&
+        ((a as any).path !== undefined
+          ? (a as any).path === (b as any).path
+          : (a as any).id === (b as any).id)
+      const i = s.activeTab ? s.tabs.findIndex((t) => same(t, s.activeTab!)) : -1
+      const next = s.tabs[(i + delta + s.tabs.length) % s.tabs.length]
+      s.setActiveTab(next)
+    }
+
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -167,6 +227,7 @@ export default function App() {
           </button>
         </nav>
 
+        {store.sidebarOpen && (
         <aside className="flex w-[268px] shrink-0 flex-col border-r border-border">
           {store.view === 'explorer' && <FileTree onPickFolder={pickFolder} />}
           {store.view === 'search' && <SearchPanel />}
@@ -174,6 +235,7 @@ export default function App() {
           {store.view === 'git' && <GitPanel />}
           {store.view === 'api' && <ApiPanel />}
         </aside>
+        )}
 
         <main className="flex min-w-0 flex-1 flex-col">
           <div
@@ -203,12 +265,20 @@ export default function App() {
             {store.approvals.length} awaiting approval
           </span>
         )}
+        {store.cursors.count > 1 && (
+          <span className="shrink-0 text-accent">
+            {store.cursors.count} cursors
+            {store.cursors.chars > 0 && ` · ${store.cursors.chars} selected`}
+          </span>
+        )}
         <span className="ml-auto shrink-0">
           {store.detection?.found ? store.detection.version : 'Claude Code not found'}
         </span>
       </footer>
 
       <CommandPalette commands={commands} />
+      {store.quickOpenOpen && <QuickOpen onClose={() => store.set('quickOpenOpen', false)} />}
+      {store.shortcutsOpen && <ShortcutsDialog onClose={() => store.set('shortcutsOpen', false)} />}
       {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
     </div>
   )

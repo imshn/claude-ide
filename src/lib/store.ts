@@ -114,6 +114,8 @@ interface State {
   /** Files that are not text; they open in the media viewer. */
   binaryPaths: string[]
   reveal: { abs: string; line: number } | null
+  /** Bumped when a file is opened deliberately, so the editor takes focus. */
+  focusEditor: number
   /** Code the user sent to chat with ⌘L. */
   codeSelection: CodeSelection | null
 
@@ -135,8 +137,13 @@ interface State {
   written: Record<string, string>
   selected: string | null
 
+  /** Live multi-cursor readout for the status bar. */
+  cursors: { count: number; chars: number }
+  sidebarOpen: boolean
   view: View
   paletteOpen: boolean
+  quickOpenOpen: boolean
+  shortcutsOpen: boolean
   terminalOpen: boolean
   status: string
 
@@ -489,6 +496,7 @@ export const useStore = create<State & Actions>((setState, get) => {
     contents: {},
     binaryPaths: [],
     reveal: null,
+    focusEditor: 0,
     codeSelection: null,
     baseTree: null,
     checkpoints: [],
@@ -500,8 +508,12 @@ export const useStore = create<State & Actions>((setState, get) => {
     decisions: new Map(),
     written: {},
     selected: null,
+    cursors: { count: 0, chars: 0 },
+    sidebarOpen: true,
     view: 'explorer',
     paletteOpen: false,
+    quickOpenOpen: false,
+    shortcutsOpen: false,
     terminalOpen: false,
     status: 'Ready',
     commitDraft: '',
@@ -1078,7 +1090,12 @@ export const useStore = create<State & Actions>((setState, get) => {
 
       const tab: Tab = { kind: 'file', path: abs }
       const exists = tabs.some((t) => t.kind === 'file' && t.path === abs)
-      setState({ tabs: exists ? tabs : [...tabs, tab], activeTab: tab })
+      // Opening a file is a deliberate act; VS Code puts the caret in it.
+      setState({
+        tabs: exists ? tabs : [...tabs, tab],
+        activeTab: tab,
+        focusEditor: get().focusEditor + 1,
+      })
     },
 
     /** Load a media file's text so it can be edited as source (SVG, mostly). */
