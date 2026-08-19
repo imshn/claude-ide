@@ -196,6 +196,53 @@ export function unreviewedCount(files: FileChange[], decisions: Map<string, Deci
   return n
 }
 
+/**
+ * A contiguous run of non-context lines — one visual red/green cluster, the
+ * unit an inline (in-editor) diff decorates and offers accept/reject for.
+ * Unlike a Hunk, there is no context padding: the real code around it is
+ * already visible, live, in the buffer it sits in.
+ */
+export interface ChangeBlock {
+  id: string
+  ids: string[]
+  delLines: DiffLine[]
+  addLines: DiffLine[]
+  /** curNo of the nearest real line before this block; 0 means top of file. */
+  afterCurLine: number
+}
+
+export function changeBlocks(file: FileChange): ChangeBlock[] {
+  const blocks: ChangeBlock[] = []
+  let i = 0
+  while (i < file.lines.length) {
+    if (file.lines[i].op === 'ctx') {
+      i++
+      continue
+    }
+    const start = i
+    while (i < file.lines.length && file.lines[i].op !== 'ctx') i++
+    const run = file.lines.slice(start, i)
+
+    let afterCurLine = 0
+    for (let j = start - 1; j >= 0; j--) {
+      const no = file.lines[j].curNo
+      if (no !== undefined) {
+        afterCurLine = no
+        break
+      }
+    }
+
+    blocks.push({
+      id: `${file.path}!${blocks.length}`,
+      ids: run.map((l) => l.id),
+      delLines: run.filter((l) => l.op === 'del'),
+      addLines: run.filter((l) => l.op === 'add'),
+      afterCurLine,
+    })
+  }
+  return blocks
+}
+
 // ---------------------------------------------------------------------------
 // Logical grouping. A flat file list hides intent; these rules recover the
 // shape of the change. Order matters — a test file for auth belongs to Tests.

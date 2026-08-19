@@ -281,3 +281,63 @@
   background: color-mix(in srgb, var(--color-pending) 16%, transparent);
 }
 
+/* Inline (in-editor) diff review — lives right where the code changed instead
+   of a separate panel, and vanishes the instant a block is decided. */
+.inline-diff-zone {
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 19px;
+}
+.inline-diff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 19px;
+  padding: 0 6px 0 44px;
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+}
+.inline-diff-toolbar button {
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  border: none;
+  border-radius: 4px;
+  padding: 1px 7px;
+  cursor: pointer;
+  line-height: 15px;
+}
+.inline-diff-accept {
+  color: var(--color-add);
+  background: var(--color-add-bg);
+}
+.inline-diff-accept:hover {
+  filter: brightness(1.25);
+}
+.inline-diff-reject {
+  color: var(--color-del);
+  background: var(--color-del-bg);
+}
+.inline-diff-reject:hover {
+  filter: brightness(1.25);
+}
+.inline-diff-del-line {
+  height: 19px;
+  padding-left: 44px;
+  color: color-mix(in srgb, var(--color-del) 85%, var(--color-fg));
+  background: var(--color-del-bg);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--color-del) 60%, transparent);
+  white-space: pre;
+  overflow: hidden;
+}
+.inline-diff-add-bg {
+  background: var(--color-add-bg);
+}
+.inline-diff-add-gutter::before {
+  content: '';
+  display: block;
+  width: 3px;
+  height: 100%;
+  background: var(--color-add);
+}
+

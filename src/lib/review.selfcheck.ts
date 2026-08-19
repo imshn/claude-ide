@@ -16,6 +16,7 @@ import {
   groupFiles,
   stemOf,
   unreviewedCount,
+  changeBlocks,
 } from './review'
 
 const decisions = new Map<string, Decision>()
@@ -193,6 +194,39 @@ const reset = () => decisions.clear()
   assert.equal(unreviewedCount(files, d), 1, 'accepting a file must drop the badge count')
   for (const id of changedIdsInFile(b)) d.set(id, 'rejected')
   assert.equal(unreviewedCount(files, d), 0, 'a rejected file has also been reviewed')
+}
+
+{
+  // Inline (in-editor) diff blocks: one per contiguous run of changed lines,
+  // anchored to the real line it belongs after, so an editor can zone/decorate
+  // it without needing hunk context padding.
+  const f = buildFileChange('f', '/f', 'M', 'a\nb\nc\nd\ne\n', 'a\nX\nc\nY\nZ\ne\n')
+  const blocks = changeBlocks(f)
+  assert.equal(blocks.length, 2, 'two separate replaced regions')
+  assert.equal(blocks[0].afterCurLine, 1, 'first block sits right after line a (curNo 1)')
+  assert.equal(blocks[0].delLines.length, 1)
+  assert.equal(blocks[0].addLines.length, 1)
+  assert.equal(blocks[0].addLines[0].text, 'X')
+  assert.equal(blocks[1].delLines.length, 1)
+  assert.equal(blocks[1].addLines.length, 2)
+  assert.deepEqual(
+    blocks[1].addLines.map((l) => l.curNo),
+    [4, 5],
+    'added lines must carry real buffer line numbers for the editor to decorate',
+  )
+
+  // A pure deletion has no add lines and anchors right after the line before it.
+  const del = buildFileChange('g', '/g', 'M', 'a\nb\nc\n', 'a\nc\n')
+  const delBlocks = changeBlocks(del)
+  assert.equal(delBlocks.length, 1)
+  assert.equal(delBlocks[0].addLines.length, 0)
+  assert.equal(delBlocks[0].afterCurLine, 1)
+
+  // A pure insertion at the very top anchors before line 1.
+  const ins = buildFileChange('h', '/h', 'M', 'b\n', 'a\nb\n')
+  const insBlocks = changeBlocks(ins)
+  assert.equal(insBlocks[0].afterCurLine, 0, 'top-of-file insert has nothing real before it')
+  assert.equal(insBlocks[0].delLines.length, 0)
 }
 
 console.log('review engine: all checks passed')

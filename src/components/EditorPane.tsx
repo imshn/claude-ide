@@ -4,6 +4,7 @@ import clsx from 'clsx'
 import { FileText, Network, Send, X } from 'lucide-react'
 import { fs } from '../lib/ipc'
 import { useStore, type Tab } from '../lib/store'
+import { changeBlocks, rollup, type ChangeBlock, type Decision } from '../lib/review'
 import { canFormat } from '../lib/format'
 import { isMediaPath } from '../lib/media'
 import { pathFromUrl } from '../lib/cdp'
@@ -47,10 +48,14 @@ export function EditorPane() {
   const breakpoints = useStore((s) => s.breakpoints)
   const debugFrames = useStore((s) => s.debug.frames)
   const debugStatus = useStore((s) => s.debug.status)
+  const decisions = useStore((s) => s.decisions)
+  const decide = useStore((s) => s.decide)
 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null)
   const [menu, setMenu] = useState<MenuState | null>(null)
   const decorationsRef = useRef<string[]>([])
+  const diffZoneIdsRef = useRef<string[]>([])
+  const diffDecoIdsRef = useRef<string[]>([])
   /** SVGs the user chose to edit as text rather than preview. */
   const [asText, setAsText] = useState<Set<string>>(new Set())
 
@@ -193,6 +198,90 @@ export function EditorPane() {
     )
     decorationsRef.current = ids
   }, [breakpoints, activePath, root, debugFrames, debugStatus, contents])
+
+  // Live, in-place diff review: the point of "accept a change" is seeing it
+  // happen right where you're looking, not in a separate panel. Every pending
+  // block gets ghost red lines for what's gone, a green background on what's
+  // new, and an inline Accept/Reject bar — and the moment a decision resolves
+  // it, the block simply stops being painted. Resolved blocks stay in the
+  // Changes workspace (and undo history) until the next checkpoint; only the
+  // inline view hides them.
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor) return
+
+    const file = activePath ? files.find((f) => f.absPath === activePath) : undefined
+    const blocks: ChangeBlock[] = file
+      ? changeBlocks(file).filter((b) => {
+          const s = rollup(b.ids, decisions)
+          return s !== 'accepted' && s !== 'rejected'
+        })
+      : []
+
+    try {
+      const newZoneIds: string[] = []
+      // Monaco's own IModelDeltaDecoration type; built imperatively below.
+      const addDecos: any[] = []
+
+      editor.changeViewZones((accessor) => {
+        for (const id of diffZoneIdsRef.current) accessor.removeZone(id)
+
+        for (const block of blocks) {
+          const dom = document.createElement('div')
+          dom.className = 'inline-diff-zone'
+
+          const toolbar = document.createElement('div')
+          toolbar.className = 'inline-diff-toolbar'
+          const acceptBtn = document.createElement('button')
+          acceptBtn.textContent = '✓ Accept'
+          acceptBtn.className = 'inline-diff-accept'
+          acceptBtn.onclick = () => void decide(block.ids, 'accepted' as Decision)
+          const rejectBtn = document.createElement('button')
+          rejectBtn.textContent = '✕ Reject'
+          rejectBtn.className = 'inline-diff-reject'
+          rejectBtn.onclick = () => void decide(block.ids, 'rejected' as Decision)
+          toolbar.append(acceptBtn, rejectBtn)
+          dom.appendChild(toolbar)
+
+          for (const line of block.delLines) {
+            const row = document.createElement('div')
+            row.className = 'inline-diff-del-line'
+            row.textContent = `− ${line.text}`
+            dom.appendChild(row)
+          }
+
+          const id = accessor.addZone({
+            afterLineNumber: block.afterCurLine,
+            heightInLines: 1 + block.delLines.length,
+            domNode: dom,
+          })
+          newZoneIds.push(id)
+
+          if (block.addLines.length) {
+            const nums = block.addLines.map((l) => l.curNo as number)
+            addDecos.push({
+              range: {
+                startLineNumber: Math.min(...nums),
+                startColumn: 1,
+                endLineNumber: Math.max(...nums),
+                endColumn: 1,
+              },
+              options: {
+                isWholeLine: true,
+                className: 'inline-diff-add-bg',
+                linesDecorationsClassName: 'inline-diff-add-gutter',
+              },
+            })
+          }
+        }
+        diffZoneIdsRef.current = newZoneIds
+      })
+
+      diffDecoIdsRef.current = editor.deltaDecorations(diffDecoIdsRef.current, addDecos)
+    } catch {
+      /* the editor instance behind a just-closed tab may already be disposed */
+    }
+  }, [activePath, files, decisions, decide])
 
   // Every open file is a Monaco model, so cross-file completion works for the
   // files you actually have open.

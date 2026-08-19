@@ -124,6 +124,17 @@ Authentication and `auth.test.ts` under Tests. It is a guess, not semantics; the
 grouping function is one pure function and is the obvious place to later ask
 Claude to group changes instead.
 
+**Inline review.** Opening a modified file in the normal editor — not the
+separate Changes workspace — shows the diff right where it happened: deleted
+lines as a red ghost block, added lines with a green background, and a small
+Accept / Reject bar sitting directly above the change. Click one and the block
+simply stops being painted, live, no panel switch involved. It is built on
+Monaco view zones and decorations (`ChangeBlock` / `changeBlocks()` in
+`review.ts`), not a second diff engine — the same decision map and disk-write
+path as the Changes workspace, just rendered where you're already looking. A
+resolved block still exists in the Changes workspace and undo history until
+the next checkpoint; only the inline view stops showing it.
+
 ## AI features
 
 **Project Intelligence** (`src-tauri/src/intel.rs`) scans the repo on open —
