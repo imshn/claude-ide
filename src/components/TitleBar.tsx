@@ -1,14 +1,20 @@
+import { useMemo } from 'react'
 import clsx from 'clsx'
 import { FolderGit2, GitBranch, Search, SquareTerminal } from 'lucide-react'
 import { useStore } from '../lib/store'
+import { unreviewedCount } from '../lib/review'
 import { Button } from './ui'
 
 export function TitleBar({ onPickFolder }: { onPickFolder: () => void }) {
   const root = useStore((s) => s.root)
   const repo = useStore((s) => s.repo)
   const files = useStore((s) => s.files)
+  const decisions = useStore((s) => s.decisions)
   const set = useStore((s) => s.set)
   const terminalOpen = useStore((s) => s.terminalOpen)
+  // Files still owed a decision, not just files with any diff — otherwise
+  // accepting the last change never clears the badge and looks like nothing happened.
+  const pending = useMemo(() => unreviewedCount(files, decisions), [files, decisions])
 
   return (
     <header className="drag-region hairline flex h-11 shrink-0 items-center gap-3 bg-bg pr-2 pl-[86px]">
@@ -30,12 +36,12 @@ export function TitleBar({ onPickFolder }: { onPickFolder: () => void }) {
         </span>
       )}
 
-      {files.length > 0 && (
+      {pending > 0 && (
         <button
           onClick={() => set('view', 'changes')}
           className="no-drag anim tnum rounded-full border border-accent/35 bg-accent-soft px-2 py-0.5 text-[11px] text-accent hover:border-accent/60"
         >
-          {files.length} to review
+          {pending} to review
         </button>
       )}
 

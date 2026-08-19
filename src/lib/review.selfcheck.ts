@@ -15,6 +15,7 @@ import {
   proposalAction,
   groupFiles,
   stemOf,
+  unreviewedCount,
 } from './review'
 
 const decisions = new Map<string, Decision>()
@@ -177,6 +178,21 @@ const reset = () => decisions.clear()
   assert.equal(stemOf('src/index.d.ts'), 'index')
   assert.equal(stemOf('a/b/user_test.go'), 'user')
   assert.equal(stemOf('Makefile'), 'makefile')
+}
+
+{
+  // A fully-decided file (accepted or rejected) is reviewed, not "to review" —
+  // this is the count the title bar badge uses, and only it decrementing on
+  // accept is what tells a user the click actually did something.
+  const a = buildFileChange('a', '/a', 'M', 'x', 'y')
+  const b = buildFileChange('b', '/b', 'M', 'p', 'q')
+  const files = [a, b]
+  const d = new Map<string, Decision>()
+  assert.equal(unreviewedCount(files, d), 2, 'nothing decided yet')
+  for (const id of changedIdsInFile(a)) d.set(id, 'accepted')
+  assert.equal(unreviewedCount(files, d), 1, 'accepting a file must drop the badge count')
+  for (const id of changedIdsInFile(b)) d.set(id, 'rejected')
+  assert.equal(unreviewedCount(files, d), 0, 'a rejected file has also been reviewed')
 }
 
 console.log('review engine: all checks passed')

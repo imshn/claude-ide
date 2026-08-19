@@ -182,6 +182,20 @@ export function changedIdsInFile(file: FileChange): string[] {
   return file.lines.filter((l) => l.op !== 'ctx').map((l) => l.id)
 }
 
+/**
+ * Files still owed a decision — not the same as "has a diff at all". A fully
+ * accepted or rejected file has been reviewed; it just hasn't been snapshotted
+ * into a new baseline yet, so it stays in the list until the next checkpoint.
+ */
+export function unreviewedCount(files: FileChange[], decisions: Map<string, Decision>): number {
+  let n = 0
+  for (const f of files) {
+    const s = rollup(changedIdsInFile(f), decisions)
+    if (s !== 'accepted' && s !== 'rejected') n++
+  }
+  return n
+}
+
 // ---------------------------------------------------------------------------
 // Logical grouping. A flat file list hides intent; these rules recover the
 // shape of the change. Order matters — a test file for auth belongs to Tests.
